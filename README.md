@@ -8,11 +8,51 @@ then give every leaf the full time budget of the whole task.
 
 Effort multiplies with depth. It never divides.
 
-[The problem](#the-problem-model-laziness-is-real-and-measured) · [The method](#the-depth-tree-method) · [Install](#install) · [Research](#the-research)
+Works with Claude Code, OpenAI Codex, Cursor and anything else that reads `SKILL.md`.
+
+[Use it](#use-it) · [The problem](#the-problem-model-laziness-is-real-and-measured) · [The method](#the-depth-tree-method) · [Research](#the-research) · [Contributing](#contributing)
 
 </div>
 
 ---
+
+## Use it
+
+Install once, then invoke it in plain language. The skill also triggers on its own when your request matches its description.
+
+```
+/unlazy tree 5 refactor the payment module
+```
+
+```
+tree 4 this bug hunt and do not stop until it is done
+```
+
+`tree N` means: split the task N layers deep, and every leaf at the bottom gets the full time budget of the whole task. `tree 3` is 4 units of work, `tree 5` is 16, `tree 7` is 64. Pick the depth by how badly you want it done.
+
+### Install
+
+**Any agent, via the [skills CLI](https://github.com/vercel-labs/skills)** (Claude Code, Codex, Cursor and more; it detects what you have):
+
+```bash
+npx skills add Leonxlnx/unlazy
+```
+
+Add `-g` for a user-level install or `--all` for every detected agent, non-interactively.
+
+**Claude Code, manually:**
+
+```bash
+git clone https://github.com/Leonxlnx/unlazy ~/.claude/skills/unlazy
+```
+
+**OpenAI Codex CLI, manually** (invoke with `$unlazy` or let it trigger on the description):
+
+```bash
+git clone https://github.com/Leonxlnx/unlazy ~/.codex/skills/unlazy
+```
+
+**Everything else:** [SKILL.md](SKILL.md) is a plain markdown file. Paste it as a system prompt, a Cursor rule, or a preamble. The method is model-agnostic.
 
 ## The problem: model laziness is real and measured
 
@@ -65,28 +105,6 @@ Telling a model to be thorough is a vibe request, and models regress to minimum 
 
 The method was used to build [sakura-realm](https://github.com/Leonxlnx/sakura-realm), a real-time procedural 3D landscape, as a `tree 7` run: 64 leaves across 20 file-disjoint modules, contracts written before fan-out, every module followed by an adversarial verification pass that edited code rather than filing reports. The repo, including a volumetric sky, a weather system and a fully procedural tree, shipped with zero art assets.
 
-## Install
-
-This is a [Claude Code skill](https://code.claude.com/docs/en/skills). One folder, one file.
-
-```bash
-git clone https://github.com/Leonxlnx/unlazy ~/.claude/skills/unlazy
-```
-
-Then in any session:
-
-```
-/unlazy tree 5 refactor the payment module
-```
-
-Or just use the language; the skill triggers on it:
-
-```
-tree 4 this bug hunt and do not stop until it is done
-```
-
-No Claude Code? [SKILL.md](SKILL.md) works as a system prompt or pasted preamble for any capable model. The method is model-agnostic.
-
 ## What is in the skill
 
 [SKILL.md](SKILL.md) carries the Depth Tree plus enforcement rules distilled from the research above:
@@ -119,6 +137,10 @@ Everything cited, newest first:
 - [s1: Simple test-time scaling](https://arxiv.org/abs/2501.19393) (January 2025)
 - ["Should I Give Up Now?" Investigating LLM Pitfalls in Software Engineering](https://arxiv.org/abs/2411.09916) (2024, updated 2025)
 - [Unified diffs make GPT-4 Turbo 3x less lazy](https://aider.chat/docs/unified-diffs.html) (aider)
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the two rules that matter: cite current research for behavioral claims, and keep the Depth Tree semantics intact.
 
 ## License
 

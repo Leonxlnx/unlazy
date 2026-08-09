@@ -1,6 +1,10 @@
 ---
 name: unlazy
 description: Anti-laziness execution discipline for substantial tasks. Use when work keeps coming back half done, when output must be exhaustive rather than fast, or on any invocation like /unlazy, "tree N", or "do not stop until it is done". Core method is the Depth Tree, which multiplies effort with depth instead of dividing it.
+license: MIT
+metadata:
+  author: Leonxlnx
+  source: https://github.com/Leonxlnx/unlazy
 ---
 
 # Unlazy
