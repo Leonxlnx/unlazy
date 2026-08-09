@@ -54,6 +54,24 @@ git clone https://github.com/Leonxlnx/unlazy ~/.codex/skills/unlazy
 
 **Everything else:** [SKILL.md](SKILL.md) is a plain markdown file. Paste it as a system prompt, a Cursor rule, or a preamble. The method is model-agnostic.
 
+### Or let your agent install it
+
+Paste this to Claude Code, Codex, Cursor or any agent with shell access:
+
+```
+Install the "unlazy" skill from https://github.com/Leonxlnx/unlazy so it is
+available to you in future sessions.
+
+Try `npx skills add Leonxlnx/unlazy -y` first. If that is unavailable, clone
+the repo into your own skills directory instead: ~/.claude/skills/unlazy for
+Claude Code, ~/.codex/skills/unlazy for Codex CLI, or the equivalent path for
+whatever agent you are.
+
+Then confirm it worked: show me the installed path and the first line of the
+skill's description. Do not tell me it is installed unless you have actually
+verified the file is on disk.
+```
+
 ## The problem: model laziness is real and measured
 
 "Laziness" sounds like a vibe. It is not. Recent work defines and measures it directly:
