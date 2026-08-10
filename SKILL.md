@@ -1,68 +1,104 @@
 ---
 name: unlazy
-description: Anti-laziness execution discipline for substantial tasks. Use when work keeps coming back half done, when output must be exhaustive rather than fast, or on any invocation like /unlazy, "tree N", or "do not stop until it is done". Core method is the Depth Tree, which multiplies effort with depth instead of dividing it.
+description: Anti-laziness execution discipline for substantial tasks. Use when work keeps coming back half done, when an agent reports done before it is done, when output must be exhaustive rather than fast, on long autonomous runs that tend to stall at 80 percent, or on any invocation like /unlazy, "tree N", "gates", or "do not stop until it is done". v2 enforces completion through gate files and runnable checks instead of promises. Core method is the Depth Tree, which decomposes work into leaves that each get finished against their own gates.
 license: MIT
 metadata:
   author: Leonxlnx
   source: https://github.com/Leonxlnx/unlazy
+  version: 2.0.0
 ---
 
 # Unlazy
 
-You are running under anti-laziness discipline. The failure mode this skill exists to kill is output that is technically responsive but minimum effort: stubbed code, placeholder comments, single-pass answers, premature "done" reports, and quietly narrowed scope. Research across 2025 and 2026 shows these are systematic model behaviors, not accidents: premature truncation and partial compliance with multi-part requests, early abandonment of promising reasoning paths, and shortcut-taking when the model believes resources are running out. Treat your own first instinct to wrap up as a symptom, not a signal.
+You are running under anti-laziness discipline. The failure this skill exists to kill is output that is technically responsive but quietly incomplete: the done report at 80 percent, the silently narrowed scope, the confident wrong number in a final summary, the long run that drifts into recap mode instead of working.
 
-## The Depth Tree method (core)
+v1 of this skill fought these with instructions. A controlled six-run test showed the limit of that: instructions raise effort, but the failures that survive are exactly the ones prose cannot catch, wrong numbers in self-reports and stalls that feel like completion. So v2 moves enforcement out of your goodwill and into files and checks. You do not promise you are done. You prove it against a ledger.
 
-Created by Leonxlnx. This is the main tool of this skill.
+## Rule zero: gates before work
 
-When the user says "tree N" for a task X, or when you choose depth yourself:
+Before starting real work, write the acceptance gates to a file. Not in your head, not in prose, in a file: `GATES.md` in the working directory, using the format in [templates/gates-leaf.md](templates/gates-leaf.md). One checkbox per outcome the task requires, and wherever an outcome can be checked by a command, give it a `CHECK:` line and an `EXPECT:` line so the check is runnable rather than a matter of opinion.
 
-1. **Estimate T at layer 1.** T is the time a competent, normal, single pass over the WHOLE task would take. Write it down before splitting. T is fixed once; never re-derive it per node.
+Why a file: your intentions do not survive a long context, files do. A checklist you wrote at minute 2 is still exactly as sharp at minute 90, when the pull toward wrapping up is strongest.
 
-2. **Split binary, N layers deep.** Layer 1 is the task itself. Every node splits into exactly 2 children. So tree 3 has 4 leaves, tree 5 has 16, tree 7 has 64. Leaves are the only places where real work happens; every layer above them is decomposition only.
+Done means every box is checked with evidence recorded. Run the bundled checker to execute the checks and record evidence for you:
 
-3. **The rule that matters: every leaf gets the FULL budget T.** Not T divided by the number of leaves. A trivial looking leaf still gets the whole T. Depth therefore multiplies total effort by 2 to the power of N minus 1. That multiplication is the entire point of the method. If re-estimating per leaf feels tempting, notice that it collapses the tree back into ordinary work.
+```
+node <this-skill-dir>/scripts/gate-check.mjs GATES.md
+```
 
-4. **Contracts before fan-out.** If leaves will run in parallel or touch shared surfaces, write the interfaces, data ownership and conventions down FIRST. Deep effort that does not integrate is waste.
+Manual gates (no CHECK possible) are checked by hand, but only with the `EVIDENCE:` line replaced by actual proof: a measurement, a quote of output, a file path with the relevant line. An evidence line still reading `pending` is an unmet gate, whatever the checkbox says.
 
-5. **Work each leaf in passes until a pass produces no improvement:**
-   - Pass 1: implement completely. No placeholders, no "rest left as exercise", no TODO.
-   - Pass 2: re-read what you produced as a domain expert would. Name the cheap version of each part and replace it with the good version.
-   - Pass 3: hunt defects. Edge cases, correctness proofs, performance, the tells that something is fake or generated. Fix everything found.
-   - Pass 4: polish that costs nothing extra. Tuned constants beat new features.
+If a gate becomes genuinely impossible, do not quietly drop it. Add a line `ABANDON: <gate id> <reason>` to the gates file and say so in your report. A clean, visible handover beats silent degradation, and the enforcement tooling treats an ABANDON line as an honest exit, not a failure.
 
-6. **Stop condition.** A leaf is finished when the budget is spent or a full pass finds nothing to improve. "It works" is never the stop condition.
+## Pick a mode
 
-## Enforcement rules
+**Solo** (default). The task fits one focused stretch: roughly under half an hour of real work, tree depth 3 or less. One `GATES.md`, work until it is fully checked, report with the ledger pasted.
 
-These are behavioral rules grounded in current research. Follow them for the whole session, not just inside the tree.
+**Orchestrated**. The task is a build: tree depth 4 or more, or clearly beyond one sitting. Decompose per [references/method.md](references/method.md), write `PLAN.md` plus one gates file per leaf under `gates/`, and run each leaf as a fresh subagent with a narrow brief. Read [references/orchestration.md](references/orchestration.md) before fanning out; the verification hierarchy there (leaf checks itself, parent re-runs the checks) is the entire point of the mode.
 
-**No report until done.** Reporting progress is not progress. If you notice yourself composing a status summary while acceptance gates are unmet, that is the laziness reflex firing. Return to work. Deliver one report, at the end, with measurements.
+The reason orchestrated mode exists: the stall-at-80-percent failure is an end-of-long-context disease. A fresh context per leaf means every leaf starts with full attention. That is the honest version of "every leaf gets the full budget", because the scarce resource was never time, it was attention.
 
-**Define acceptance gates before starting.** Concrete, checkable pass or fail conditions: a test passes, a number clears a threshold, a render shows the change. The task is done when gates pass, not when the output looks plausible.
+## The Depth Tree, v2
 
-**Verify, do not trust yourself.** Claims require measurement. Run it, render it, profile it, count it. If you cannot verify a claim, say so explicitly instead of asserting it.
+Created by Leonxlnx. In v2 the tree is a decomposition tool, not an effort multiplier; measured runs showed models treat the old arithmetic as a dial anyway. What depth buys you is structure:
 
-**Continuation forcing.** When you feel finished, do not conclude. Append the word "Wait" to your own reasoning and re-examine the result once more. This mirrors budget forcing from test-time scaling research, where suppressing the end of thinking and appending "Wait" measurably improves outcomes.
+1. **Split at natural joints, N layers deep.** Layer 1 is the task. Leaves are where work happens.
+2. **A leaf is a real unit of work**: ten or more minutes of focused effort, one coherent deliverable. If your leaves come out smaller, you went one layer too deep; back off.
+3. **Contracts before fan-out.** If leaves touch shared surfaces, write the interfaces, data ownership and naming into `PLAN.md` first. Deep effort that does not integrate is waste.
+4. **Branches get gates too.** Every internal node gets an integration gates file: children merged, interfaces match, cross-checks pass. Thirty-two finished leaves can still be a broken product; branch gates are where that is caught.
+5. **Effort per leaf comes from its gates**, not from N. A leaf is finished when its gates file is fully checked with evidence, or a full improvement pass finds nothing, whichever is later.
 
-**Finish one line of attack.** Underthinking research shows models abandon promising approaches prematurely and hop between strategies. Before switching approach, state what the current approach still has left to give and why switching wins. If you cannot, keep going.
+Scale guidance: tree 2 or 3 for a feature, a bug hunt, a document, solo mode. Tree 4 or 5 for a subsystem or serious refactor. Tree 6 or 7 for an entire project built to a high bar, orchestrated, with leaves mapped to disjoint work units and parallelized where the harness allows.
 
-**Do not simulate work you can do.** Overthinking research on agents shows the inverse failure: models deliberate instead of acting. If an action is cheap and reversible, take it and observe, rather than reasoning about what it would probably do.
+## Work each leaf in passes
 
-**Ignore resource anxiety.** Models take shortcuts when they believe context or time is short, and they underestimate what remains. Never compress, summarize or stub work because the end feels near. If a real limit approaches, say so and hand over cleanly instead of silently degrading.
+1. **Implement completely.** No placeholders, no TODO, no "rest as exercise".
+2. **Re-read as a domain expert.** Name the cheap version of each part, replace it with the good version.
+3. **Hunt defects.** Edge cases, correctness, performance, the tells that something is fake. Fix what you find.
+4. **Polish that costs nothing.** Tuned constants beat new features.
 
-**Full files, full lists, full sweeps.** If the task says all 80 files, the count of files actually opened must be 80, and you state that count. Sampling is only acceptable when declared.
+A pass that produces no improvement, plus a fully checked gates file, is the only finish line.
 
-**Banned outputs.** The following are defects, not style: "TODO", "rest of the code unchanged", "simplified for brevity", "left as an exercise", stub functions, elided list items, and any completion claim without the measurement that backs it.
+## Report audit
 
-## Scale guidance
+The single most reproducible failure in tested runs: final reports whose numbers were wrong while their substance was right. Confident claims like "34 stat rows" where 17 exist, written from memory instead of measurement.
 
-- tree 2 or 3: a feature, a bug hunt, a document. 2 to 4 leaves.
-- tree 4 or 5: a subsystem, a refactor, a serious review. 8 to 16 leaves.
-- tree 6 or 7: an entire project built to a high bar. 32 to 64 leaves. Map leaves onto disjoint work units and parallelize where the harness allows.
+So: at report time, re-measure every number you are about to state, or label it unverified. Paste the gates ledger with its count, N of N checked. A report is a set of claims backed by a ledger, never a vibe of completion.
 
-When the user gives no depth, pick the smallest N whose leaf count covers the task's natural parts, then go one deeper.
+## Behavioral rules
+
+The keepers from v1, still true, now backed by structure:
+
+- **No report until the ledger is full.** If you notice yourself composing a status summary while boxes are unchecked, that is the laziness reflex firing. Open the gates file and pick the next unchecked box.
+- **When you feel finished, check instead of concluding.** Run gate-check, then re-read one passed gate adversarially and try to refute its evidence. This is continuation forcing made mechanical.
+- **Finish one line of attack.** Before switching approach, state what the current one still has to give and why switching wins. If you cannot, keep going.
+- **Do not simulate work you can do.** If an action is cheap and reversible, take it and observe rather than reasoning about what it would probably do.
+- **Ignore resource anxiety.** Never compress, summarize or stub because the end feels near. If a real limit approaches, write remaining work into the gates file and hand over cleanly with ABANDON lines and reasons.
+- **Full files, full lists, full sweeps.** If the task says all 80 files, the count opened must be 80, and you state that count. Sampling is only acceptable when declared.
+
+## Token economy
+
+Discipline is not maximalism, and enforcement should be nearly free. The rules that keep this skill cheap, expanded in [references/token-economy.md](references/token-economy.md):
+
+- Checks run as shell commands, not as you re-reading everything you wrote.
+- Evidence is capped: the deciding lines of output, never full logs.
+- In orchestrated mode, a leaf brief is the contract plus its gates file, never the parent's history.
+- Append to `PLAN.md`'s status log, do not rewrite the file.
+- Mechanical leaves go to a cheaper model or lower effort where the harness allows it.
+- Below roughly half an hour of work, stay solo; subagent overhead only pays for itself on real builds.
+
+## Hard enforcement (Claude Code, optional)
+
+If the harness is Claude Code, this skill ships a Stop hook that structurally blocks ending the turn while `GATES.md` or `gates/*.md` contain unchecked boxes or pending evidence, with an ABANDON line as the honest escape. It converts "no report until done" from a rule into a wall.
+
+It changes harness behavior, so never install it silently. When a task would clearly benefit, offer it once:
+
+```
+node <this-skill-dir>/scripts/install-hooks.mjs
+```
+
+and tell the user what it does and how to remove it (`--uninstall`). Everything else in this skill works without it, in any harness that can read a markdown file.
 
 ## What this skill is not
 
-It is not maximalism for its own sake. Conversational replies, trivial edits and factual questions get normal effort. The tree is for work the user wants DONE WELL, and the discipline exists to make "done well" the only kind of done you produce.
+Conversational replies, trivial edits and factual questions get normal effort. No gates file for a one-line fix. The tree is for work the user wants DONE WELL, and the discipline exists to make "done well" the only kind of done you produce.
