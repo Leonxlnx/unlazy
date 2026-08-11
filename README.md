@@ -89,6 +89,8 @@ verified the file is on disk.
 
 ## What changed in v2, and why
 
+The original single-file skill is preserved unchanged on the [v1 branch](https://github.com/Leonxlnx/unlazy/tree/v1) if you want the instructions-only version with zero moving parts.
+
 v1 was instructions. To find out what instructions actually buy, the method was put through a controlled test: two build-from-scratch tasks (a marketing site and a three.js solar system), three conditions each (no skill, tree 3, tree 6), one fresh folder and fresh session per run, same model, same prompt body. Every output was code-reviewed by independent agents, adversarially re-verified, and live-tested in a browser.
 
 What the test found, in five lines:
