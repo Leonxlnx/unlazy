@@ -2,15 +2,18 @@
 
 # unlazy
 
-**An anti-laziness skill for AI agents.**
-Built around the Depth Tree method: split the task N layers deep,
-then give every leaf the full time budget of the whole task.
+**An anti-laziness skill for AI agents. v2: enforced, not requested.**
 
-Effort multiplies with depth. It never divides.
+v1 told the model to work harder. v2 makes half-done structurally visible:
+acceptance gates live in files, checks run as commands, and an optional hook
+blocks the agent from declaring victory while gates are unmet.
+
+You do not promise you are done. You prove it against a ledger.
 
 Works with Claude Code, OpenAI Codex, Cursor and anything else that reads `SKILL.md`.
+Hard enforcement (the Stop hook) is Claude Code only; everything else is plain markdown and Node.
 
-[Use it](#use-it) · [The problem](#the-problem-model-laziness-is-real-and-measured) · [The method](#the-depth-tree-method) · [Research](#the-research) · [Contributing](#contributing)
+[Use it](#use-it) · [What changed in v2](#what-changed-in-v2-and-why) · [How it works](#how-it-works) · [The method](#the-depth-tree-v2) · [Costs](#what-it-costs) · [Research](#the-research)
 
 </div>
 
@@ -25,10 +28,10 @@ Install once, then invoke it in plain language. The skill also triggers on its o
 ```
 
 ```
-tree 4 this bug hunt and do not stop until it is done
+tree 3 build the landing page and do not stop until every gate is checked
 ```
 
-`tree N` means: split the task N layers deep, and every leaf at the bottom gets the full time budget of the whole task. `tree 3` is 4 units of work, `tree 5` is 16, `tree 7` is 64. Pick the depth by how badly you want it done.
+`tree N` picks how deep the task gets decomposed. Leaves are units of real work, each finished against its own gates. `tree 2-3` for a feature or bug hunt, `tree 4-5` for a subsystem, `tree 6-7` for a whole project built leaf by leaf with fresh-context subagents.
 
 ### Install
 
@@ -52,7 +55,19 @@ git clone https://github.com/Leonxlnx/unlazy ~/.claude/skills/unlazy
 git clone https://github.com/Leonxlnx/unlazy ~/.codex/skills/unlazy
 ```
 
-**Everything else:** [SKILL.md](SKILL.md) is a plain markdown file. Paste it as a system prompt, a Cursor rule, or a preamble. The method is model-agnostic.
+**Everything else:** [SKILL.md](SKILL.md) is a plain markdown file. Paste it as a system prompt, a Cursor rule, or a preamble. Gates and scripts need only Node 16+.
+
+### Hard mode (Claude Code, optional)
+
+The skill works everywhere as discipline. In Claude Code it can also work as a wall: a Stop hook that structurally blocks ending the turn while gates are unmet.
+
+```bash
+node <path-to-skill>/scripts/install-hooks.mjs            # this project only (settings.local.json)
+node <path-to-skill>/scripts/install-hooks.mjs --global   # every project
+node <path-to-skill>/scripts/install-hooks.mjs --uninstall
+```
+
+It is a millisecond file scan, zero tokens per check. If the agent makes no gate progress across six consecutive blocked stops, the hook releases it with a warning instead of trapping it, and an `ABANDON: <gate> <reason>` line is always honored as an honest exit. Add `.unlazy-hook-state.json` to your `.gitignore`.
 
 ### Or let your agent install it
 
@@ -72,6 +87,92 @@ skill's description. Do not tell me it is installed unless you have actually
 verified the file is on disk.
 ```
 
+## What changed in v2, and why
+
+v1 was instructions. To find out what instructions actually buy, the method was put through a controlled test: two build-from-scratch tasks (a marketing site and a three.js solar system), three conditions each (no skill, tree 3, tree 6), one fresh folder and fresh session per run, same model, same prompt body. Every output was code-reviewed by independent agents, adversarially re-verified, and live-tested in a browser.
+
+What the test found, in five lines:
+
+| Finding | Consequence for v2 |
+|---|---|
+| Baseline already ships zero placeholders, zero console errors | The banned-list was fighting a solved problem; v2 aims at what actually failed |
+| The skill raised effort 1.6-3.9x and fixed 4-10 self-found defects pre-delivery | The passes and gates discipline demonstrably work; they stay |
+| tree 6 cost about 1.0-1.5x tree 3, never the promised 8x | The 2^(N-1) arithmetic was fiction; depth is now decomposition, not multiplication |
+| The only hard live failure was a baseline build, and its report claimed the case was handled | Claims need runnable checks, not confidence; hence CHECK/EXPECT gates |
+| Every skill run's final report contained 1-3 wrong numbers; baselines had zero | Hence the report audit rule: re-measure every number at report time |
+
+The deeper lesson: prose cannot enforce prose. A model that under-executes instructions also under-executes the instruction not to under-execute. So v2 moves enforcement down a hierarchy, each layer catching what the one above misses:
+
+1. **Discipline** (SKILL.md): weakest layer, works in any agent.
+2. **Gates files** (`GATES.md`, `gates/*.md`): intentions written at minute 2 stay sharp at minute 90.
+3. **Runnable checks** (`scripts/gate-check.mjs`): a CHECK command decides, not a feeling of completion.
+4. **Parent re-verification** (orchestrated mode): the dispatcher re-runs each leaf's checks; self-certification is worthless.
+5. **The Stop hook** (`scripts/stop-hook.mjs`): ending the turn with unmet gates is blocked, mechanically.
+
+## How it works
+
+Before real work starts, the agent writes its acceptance gates to a file:
+
+```markdown
+# Gates: pricing section
+
+- [ ] G1: three tiers render with real copy
+  CHECK: node check.js pricing --tiers
+  EXPECT: 3/3 tiers ok
+  EVIDENCE: pending
+
+- [ ] G2: annual toggle changes both price and label
+  CHECK: node check.js pricing --toggle
+  EXPECT: toggle ok
+  EVIDENCE: pending
+```
+
+`gate-check.mjs` runs the CHECK commands, flips boxes only when EXPECT matches, and records the deciding output lines as evidence. A checked box whose evidence still reads `pending` counts as unmet; a checkbox is a claim, evidence is the proof. Done means the ledger is full, and the final report pastes it, N of N, with every number re-measured at report time.
+
+For big builds (tree 4+), the tree becomes a real plan: `PLAN.md` holds the contract (interfaces, file ownership, naming, fixed before fan-out), every leaf and branch gets its own gates file, and each leaf runs as a fresh subagent. Fresh context per leaf is the point: the stall-at-80-percent failure is an end-of-long-context disease, and attention, not time, was always the scarce resource.
+
+## The Depth Tree, v2
+
+Created by [Leonxlnx](https://github.com/Leonxlnx).
+
+1. **Split at natural joints, N layers deep.** Leaves are where work happens; branches are decomposition and integration.
+2. **A leaf is a real unit of work**: ten or more minutes, one deliverable, one gates file. Smaller leaves mean you went too deep.
+3. **Contracts before fan-out.** Interfaces and file ownership are fixed in PLAN.md before any leaf starts.
+4. **Branches get integration gates.** Thirty-two locally perfect leaves can still be a broken product; branch gates catch exactly that.
+5. **Effort per leaf comes from its gates.** Finished means every box checked with evidence and an improvement pass that finds nothing, whichever is later.
+
+Full method: [references/method.md](references/method.md) · gate format spec: [references/gates.md](references/gates.md) · orchestration: [references/orchestration.md](references/orchestration.md)
+
+## What it costs
+
+Measured, not guessed (details in [references/token-economy.md](references/token-economy.md)):
+
+- Discipline alone (solo mode, gates file, no hook) costs a few hundred tokens of overhead and roughly 1.5-4x baseline output on tasks the model would otherwise treat lightly. That multiple bought committed design, robustness sweeps and pre-delivery bug hunts in testing.
+- The hook costs zero tokens; it is a file scan.
+- Orchestrated mode multiplies cost with leaf count, deliberately, and is worth it only for real builds. Below roughly half an hour of work, stay solo.
+- Checks-as-commands is the quiet saver: every CHECK line replaces thousands of tokens of the model re-reading its own work with a free subprocess.
+
+## What is in the repo
+
+```
+SKILL.md                       the skill: rule zero, modes, tree v2, report audit
+references/
+  method.md                    the Depth Tree v2 in full
+  gates.md                     gate file format spec and writing guide
+  orchestration.md             leaves as fresh agents, verification hierarchy
+  token-economy.md             cost discipline, measured
+templates/
+  PLAN.md                      contract + tree + append-only status log
+  gates-leaf.md                per-leaf gates
+  gates-node.md                per-branch integration gates
+scripts/
+  gate-check.mjs               runs CHECK commands, flips boxes, records evidence
+  stop-hook.mjs                Claude Code Stop hook: blocks stop while gates unmet
+  install-hooks.mjs            idempotent hook install/uninstall
+```
+
+All scripts are zero-dependency Node 16+, tested on Windows and POSIX shells.
+
 ## The problem: model laziness is real and measured
 
 "Laziness" sounds like a vibe. It is not. Recent work defines and measures it directly:
@@ -82,62 +183,11 @@ verified the file is on disk.
 - Agents take shortcuts when they believe resources are running out. Cognition found Claude Sonnet 4.5 **underestimated its remaining context and wrapped up early**, a behavior now called context anxiety ([Inkeep's writeup](https://inkeep.com/blog/context-anxiety)).
 - The failure is mainstream enough that business press covers it: advanced models showing signs of laziness is a named risk for companies betting on agents ([Fortune, July 2026](https://fortune.com/2026/07/28/advanced-ai-models-laziness-open-ai-anthropic/)).
 
-One concrete, painful example of the genre: an agent given 80 files to fix reported all 80 done, with a confident report to back it up. It had opened 11.
+And the v2-specific finding from this project's own controlled test: on a frontier model the visible failures (stubs, placeholders) are gone, while the invisible ones remain, premature done reports and confidently wrong numbers in final summaries. Those two are exactly what gates and the report audit target.
 
 The upside is equally well measured. Effort is steerable. Appending a single "Wait" token and suppressing the end of thinking, called budget forcing, lifts competition math scores by double digits ([s1: Simple test-time scaling, arXiv 2501.19393](https://arxiv.org/abs/2501.19393)). Aider cut lazy coding threefold just by changing the edit format ([unified diffs](https://aider.chat/docs/unified-diffs.html)). And the ceiling keeps rising fast: METR measures the length of task agents can complete at 50 percent reliability doubling roughly every four months ([Time Horizon 1.1, January 2026](https://metr.org/blog/2026-1-29-time-horizon-1-1/)).
 
-So: models default to minimum effort, effort responds to structure, and the structure is what this skill supplies.
-
-## The Depth Tree method
-
-Created by [Leonxlnx](https://github.com/Leonxlnx). This is the core of the skill.
-
-### The rules
-
-1. **Estimate T once, at the root.** T is how long the whole task would take done normally, in one competent pass.
-2. **Split binary, N layers deep.** Layer 1 is the task. Every node splits in two. Leaves are where all real work happens.
-3. **Every leaf gets the full T.** Not a share of it. A leaf that looks trivial still gets the whole budget.
-4. **Per leaf, iterate until a pass finds nothing to improve:** implement completely, then critique as an expert, then hunt defects, then polish.
-5. **Never stop at "works".** Stop when the budget is spent or improvement genuinely runs dry.
-
-```
-tree 3                     X                layer 1: estimate T here
-                         /   \
-                      X.1     X.2           layer 2: decomposition only
-                     /   \   /   \
-                   L1    L2 L3    L4        layer 3: 4 leaves, EACH gets full T
-```
-
-Total effort is T times 2 to the power of N minus 1. `tree 3` is 4T. `tree 7` is 64T. Depth is not a way of slicing the work thinner. It is a dial that multiplies how much work happens.
-
-### Why it beats "try harder" prompting
-
-Telling a model to be thorough is a vibe request, and models regress to minimum effort under it. The tree converts thoroughness into arithmetic:
-
-- **The budget is explicit and per-leaf.** A leaf cannot end early by feeling finished, because its stop condition is a spent budget or a no-improvement pass, not a sense of completion.
-- **Decomposition removes the summary escape hatch.** A model asked for one big thing can hand back a sketch of the whole. A model working leaf 23 of 64 has nothing to summarize. The only move available is the work itself.
-- **Re-estimating is forbidden.** The collapse case, where each leaf gets a fresh smaller estimate, quietly restores ordinary effort. Fixing T at the root is what makes depth multiply.
-- **It matches how effort actually scales in the research.** Budget forcing works by refusing the stop token. The tree is the same refusal, applied at task scale.
-
-### Battle test
-
-The method was used to build [sakura-realm](https://github.com/Leonxlnx/sakura-realm), a real-time procedural 3D landscape, as a `tree 7` run: 64 leaves across 20 file-disjoint modules, contracts written before fan-out, every module followed by an adversarial verification pass that edited code rather than filing reports. The repo, including a volumetric sky, a weather system and a fully procedural tree, shipped with zero art assets.
-
-## What is in the skill
-
-[SKILL.md](SKILL.md) carries the Depth Tree plus enforcement rules distilled from the research above:
-
-| Rule | Counters |
-|---|---|
-| No report until done | Premature completion claims |
-| Acceptance gates before starting | "Looks plausible" passing as done |
-| Verify, do not trust yourself | Confident false reports |
-| Continuation forcing ("Wait") | Early stopping |
-| Finish one line of attack | Underthinking, strategy hopping |
-| Do not simulate work you can do | Overthinking, deliberation instead of action |
-| Ignore resource anxiety | Context-anxiety shortcuts |
-| Full files, full lists, full sweeps | Silent sampling |
-| Banned outputs list | Placeholders, stubs, elisions |
+So: models default to minimum effort, effort responds to structure, and structure that lives in files and hooks beats structure that lives in prose. That is v2.
 
 ## The research
 
@@ -158,7 +208,7 @@ Everything cited, newest first:
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the two rules that matter: cite current research for behavioral claims, and keep the Depth Tree semantics intact.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md): cite current research for behavioral claims, keep enforcement structural, and keep it small.
 
 ## License
 
