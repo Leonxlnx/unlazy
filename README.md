@@ -69,6 +69,8 @@ node <path-to-skill>/scripts/install-hooks.mjs --uninstall
 
 It is a millisecond file scan, zero tokens per check. If the agent makes no gate progress across six consecutive blocked stops, the hook releases it with a warning instead of trapping it, and an `ABANDON: <gate> <reason>` line is always honored as an honest exit. Add `.unlazy-hook-state.json` to your `.gitignore`.
 
+One safety rule: gate files are executable content. `CHECK:` lines run in your shell. Gates written by you or your agent this session are the intended flow, but a repository you cloned can ship a `GATES.md` or `gates/*.md` of its own, and the first `gate-check` run there would execute whatever those lines contain. Treat inherited gate files like postinstall scripts: read the `CHECK:` lines before the first run in any repo whose gates you did not write.
+
 ### Or let your agent install it
 
 Paste this to Claude Code, Codex, Cursor or any agent with shell access:
@@ -108,7 +110,7 @@ The deeper lesson: prose cannot enforce prose. A model that under-executes instr
 1. **Discipline** (SKILL.md): weakest layer, works in any agent.
 2. **Gates files** (`GATES.md`, `gates/*.md`): intentions written at minute 2 stay sharp at minute 90.
 3. **Runnable checks** (`scripts/gate-check.mjs`): a CHECK command decides, not a feeling of completion.
-4. **Parent re-verification** (orchestrated mode): the dispatcher re-runs each leaf's checks; self-certification is worthless.
+4. **Parent re-verification** (orchestrated mode): the dispatcher re-runs each leaf's checks with `--reverify`; self-certification of runnable gates is worthless.
 5. **The Stop hook** (`scripts/stop-hook.mjs`): ending the turn with unmet gates is blocked, mechanically.
 
 ## How it works
@@ -129,7 +131,7 @@ Before real work starts, the agent writes its acceptance gates to a file:
   EVIDENCE: pending
 ```
 
-`gate-check.mjs` runs the CHECK commands, flips boxes only when EXPECT matches, and records the deciding output lines as evidence. A checked box whose evidence still reads `pending` counts as unmet; a checkbox is a claim, evidence is the proof. Done means the ledger is full, and the final report pastes it, N of N, with every number re-measured at report time.
+`gate-check.mjs` runs the CHECK commands, flips boxes only when EXPECT matches, and records the deciding output lines as evidence. A checked box whose evidence still reads `pending` counts as unmet; a checkbox is a claim, evidence is the proof. Done means the ledger is full, and the final report pastes it, N of N, with every number re-measured at report time. `--reverify` re-runs every CHECK command, including gates already marked met, and unchecks any whose evidence does not reproduce: that is how the driver in orchestrated mode verifies a leaf without trusting its self-report.
 
 For big builds (tree 4+), the tree becomes a real plan: `PLAN.md` holds the contract (interfaces, file ownership, naming, fixed before fan-out), every leaf and branch gets its own gates file, and each leaf runs as a fresh subagent. Fresh context per leaf is the point: the stall-at-80-percent failure is an end-of-long-context disease, and attention, not time, was always the scarce resource.
 
@@ -168,9 +170,11 @@ templates/
   gates-leaf.md                per-leaf gates
   gates-node.md                per-branch integration gates
 scripts/
-  gate-check.mjs               runs CHECK commands, flips boxes, records evidence
+  gate-check.mjs               runs CHECK commands, flips boxes, records evidence;
+                               --reverify re-runs met gates' checks (parent verification)
   stop-hook.mjs                Claude Code Stop hook: blocks stop while gates unmet
   install-hooks.mjs            idempotent hook install/uninstall
+  verify.mjs                   self-test: the full CONTRIBUTING matrix plus regressions
 ```
 
 All scripts are zero-dependency Node 16+, tested on Windows and POSIX shells.

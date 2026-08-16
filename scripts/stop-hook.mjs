@@ -9,14 +9,18 @@
 //   - All gates met or abandoned      -> allow
 //   - Unmet gates, progress happening -> block with a one-line reason
 //   - Unmet gates, NO progress after MAX_BLOCKS consecutive blocks -> allow
-//     with a warning (never traps a genuinely stuck agent; Claude Code
-//     additionally force-releases after 8 consecutive blocks)
+//     with a warning (never traps a genuinely stuck agent; Claude Code also
+//     ends the turn with a warning if a Stop hook blocks too many
+//     consecutive times)
 //
 // Progress = the combined content of the gate files changed since last block.
 // State lives in .unlazy-hook-state.json next to the gates (add to .gitignore).
 //
 // Contract (docs: code.claude.com/docs/en/hooks):
-//   stdin  JSON with { cwd, stop_hook_active, ... }
+//   stdin  JSON with { cwd, stop_hook_active, ... }. stop_hook_active is true
+//          when Claude Code is already continuing because of a stop hook; this
+//          hook deliberately keeps its own progress counter instead of
+//          releasing immediately on that flag, and MAX_BLOCKS bounds the loop.
 //   stdout {"decision":"block","reason":"..."} + exit 0 to block; exit 0 silent to allow.
 
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
@@ -40,7 +44,9 @@ function gateFiles(dir) {
   const gdir = join(dir, "gates");
   if (existsSync(gdir)) {
     try {
-      for (const f of readdirSync(gdir)) if (f.endsWith(".md")) found.push(join(gdir, f));
+      // Sorted order keeps the combined content hash below deterministic
+      // across platforms and runs.
+      for (const f of readdirSync(gdir).sort()) if (f.endsWith(".md")) found.push(join(gdir, f));
     } catch { /* ignore */ }
   }
   return found;
@@ -71,7 +77,11 @@ for (const file of files) {
     if (!cur.checked || pending) unmet.push(cur.id);
     cur = null;
   };
+  let inFence = false;
   for (const line of lines) {
+    // Fenced code blocks can embed format examples; they are not gates.
+    if (/^\s*```/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
     const g = line.match(GATE_RE);
     if (g) {
       flush();

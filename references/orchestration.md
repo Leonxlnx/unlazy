@@ -17,11 +17,13 @@ plan, dispatch, verify, and integrate.
    - its own gates file, verbatim
    - the instruction: work the four passes until every gate is met with
      evidence, then stop; if a gate is impossible, ABANDON it with a reason.
-3. **Verify, never trust.** When the leaf returns, re-run its checks
-   yourself: `node <skill-dir>/scripts/gate-check.mjs --status gates/leaf-x.md`
-   and rerun a spot-check of the CHECK commands. A leaf that checked its own
-   boxes without evidence gets sent back with the specific unmet gates named.
-   This is the layer that makes self-certification worthless.
+3. **Verify, never trust.** When the leaf returns, re-verify it mechanically:
+   `node <skill-dir>/scripts/gate-check.mjs --reverify gates/leaf-x.md`
+   re-runs every CHECK command, including gates the leaf marked met, and
+   unchecks any whose evidence does not reproduce. For runnable gates this
+   makes self-certification worthless; manual gates still need your judgment,
+   so spot-read their evidence lines. A leaf that comes back with demoted
+   gates gets sent back with the specific failures named.
 4. **Log and advance.** Append one line to PLAN.md's status log. Dispatch the
    next leaf. When all children of a branch are verified, work the branch's
    integration gates yourself (or dispatch an integration leaf for it).
