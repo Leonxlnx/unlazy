@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for wanting to improve unlazy. It is a small project on purpose: one skill file, a few references and three zero-dependency scripts. Contributions that keep it small are the easiest to merge.
+Thanks for wanting to improve unlazy. It is a small project on purpose: one skill file, a few references and four zero-dependency scripts. Contributions that keep it small are the easiest to merge.
 
 ## What is welcome
 
@@ -20,4 +20,4 @@ Thanks for wanting to improve unlazy. It is a small project on purpose: one skil
 
 ## How
 
-Open an issue for anything debatable, or a PR directly for anything obvious. There is no build step. For script changes, exercise every path by hand: a gates file with a passing check, a failing check, a regex EXPECT, a manual gate, and an ABANDON line; plus the hook's block, release-after-6, progress-reset and no-gates paths, and the installer's install, idempotence and uninstall round trip.
+Open an issue for anything debatable, or a PR directly for anything obvious. There is no build step. For script changes, exercise every path by hand: a gates file with a passing check, a failing check, a regex EXPECT, a manual gate, and an ABANDON line; plus the hook's block, release-after-6, progress-reset and no-gates paths, and the installer's install, idempotence and uninstall round trip. Or run `node scripts/verify.mjs`, which exercises all of these paths plus the known regressions (dropped positional args, forged evidence, CRLF files, fenced examples), and add a case for whatever you changed.

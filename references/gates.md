@@ -26,7 +26,11 @@ ABANDON: G2 <reason, only if a gate had to be surrendered>
 
 - A gate starts at a line matching `- [ ]` or `- [x]` (case-insensitive x).
 - Indented `CHECK:`, `EXPECT:`, `EVIDENCE:` lines up to the next gate belong
-  to the gate above them.
+  to the gate above them. Unindented attribute lines are ignored, and
+  gate-check reports them as warnings; indent with spaces to attach them.
+- Lines inside fenced code blocks (triple-backtick fences) are ignored by
+  both tools, so a gates file can embed format examples without them
+  counting as gates.
 - `EXPECT:` is a plain substring match against the command's combined
   stdout+stderr, unless wrapped in slashes, then it is a JavaScript regex
   (e.g. `/8\/8 passed/`).

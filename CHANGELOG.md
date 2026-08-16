@@ -1,5 +1,55 @@
 # Changelog
 
+## 2.1.0 (2026-08-16)
+
+Hardening pass from a full external validation: the scripts were exercised
+path by path, the README citations were checked against their primary
+sources, and the hook contract was checked against the Claude Code docs.
+
+Fixed:
+
+- `gate-check.mjs` silently dropped a positional file argument at index 0
+  whenever `--timeout` was absent (off-by-one in the argument filter), so
+  `gate-check.mjs gates/leaf-x.md` fell back to default file discovery.
+  Regression-tested in `scripts/verify.mjs`.
+- A passing gate with a CHECK line but no EVIDENCE line flipped its box but
+  stayed unmet forever, because the proof had nowhere to land. gate-check
+  now inserts an EVIDENCE line after the gate's attribute block and keeps
+  later gates' line indices intact.
+- Rewriting a gates file normalized CRLF line endings to LF. Endings are
+  now preserved.
+- The stop hook's progress hash could differ between runs on platforms
+  with different directory listing order; gate files are now read in
+  sorted order in both scripts.
+
+Added:
+
+- `gate-check.mjs --reverify`: re-runs every CHECK command, including gates
+  already marked met, and unchecks any whose evidence does not reproduce.
+  This makes the orchestrated-mode parent step ("verify, never trust")
+  mechanical: forged evidence in a leaf's gates file no longer survives
+  re-verification.
+- CLI validation: unknown flags, `--status` combined with `--reverify`,
+  and invalid `--timeout` values are usage errors (exit 2) instead of
+  silent misbehavior.
+- gate-check warns about unindented `CHECK:` / `EXPECT:` / `EVIDENCE:`
+  lines, which the parsers ignore.
+- Lines inside fenced code blocks are ignored by both parsers, so gate
+  files can embed format examples without them counting as gates.
+- `scripts/verify.mjs`: zero-dependency self-test covering the full
+  CONTRIBUTING matrix plus the regressions above.
+
+Docs:
+
+- The threat model for inherited gate files is now documented in SKILL.md
+  and the README: CHECK lines are executable content, review them before
+  the first gate-check run in a repo you did not write the gates for.
+- The stop-hook's header comment no longer claims an unverified "8
+  consecutive blocks" Claude Code limit; it documents the documented
+  consecutive-block warning behavior instead.
+- `references/gates.md` records the fence and indentation parsing rules;
+  `references/orchestration.md` step 3 now uses `--reverify`.
+
 ## 2.0.0 (2026-08-10)
 
 Enforcement moved from prose into files, checks and an optional hook. Motivated by a controlled six-run test of v1 (two build tasks, three conditions each, independent code review plus adversarial verification plus live browser testing) whose headline results are in the README.
