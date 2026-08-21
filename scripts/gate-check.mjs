@@ -6,6 +6,12 @@
 //   node gate-check.mjs [file ...]          run unmet gates' checks, update files
 //   node gate-check.mjs --status [file ...] report only, change nothing
 //   node gate-check.mjs --timeout 60 ...    per-check timeout in seconds (default 120)
+//   node gate-check.mjs --approve ...       consent to run this file's CHECK commands
+//
+// CHECK lines are shell commands living in a markdown file. A gate file you did
+// not write is untrusted input, so its commands are printed, not run, until you
+// approve them once with --approve. Approvals are keyed to the exact command set
+// (recorded in .unlazy-approved.json); editing a CHECK line revokes them.
 //
 // Files default to GATES.md plus gates/*.md in the current directory.
 // Exit codes: 0 = all gates met (or honestly abandoned), 1 = unmet gates remain,
@@ -13,10 +19,12 @@
 
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 const args = process.argv.slice(2);
 const statusOnly = args.includes("--status");
+const approve = args.includes("--approve");
 let timeoutSec = 120;
 const tIdx = args.indexOf("--timeout");
 if (tIdx !== -1) timeoutSec = Number(args[tIdx + 1]) || 120;
@@ -90,6 +98,32 @@ function tail(output, max = 200) {
   return (last || "(no output)").slice(0, max);
 }
 
+const APPROVALS = join(process.cwd(), ".unlazy-approved.json");
+const commandHash = (gates) =>
+  createHash("sha256").update(gates.map(g => g.check || "").join("\n")).digest("hex").slice(0, 16);
+
+// Consent gate: execute a file's CHECK commands only once they have been read
+// and approved. Keyed to the command set, so a tampered CHECK re-asks.
+function isTrusted(file, gates, withChecks) {
+  const key = resolve(file);
+  const hash = commandHash(gates);
+  let approvals = {};
+  try { approvals = JSON.parse(readFileSync(APPROVALS, "utf8")); } catch { /* none yet */ }
+  if (approvals[key] === hash) return true;
+
+  console.log(`${file}: ${withChecks.length} shell command(s) from this file:`);
+  for (const g of withChecks) console.log(`    ${g.id}: ${g.check}`);
+  if (!approve) {
+    console.log("  NOT RUN - unapproved. Read the commands above, then re-run with --approve.");
+    return false;
+  }
+  approvals[key] = hash;
+  try { writeFileSync(APPROVALS, JSON.stringify(approvals, null, 2) + "\n"); }
+  catch (e) { console.error(`  (could not record approval: ${e.message})`); }
+  console.log("  approved.");
+  return true;
+}
+
 let totalUnmet = 0;
 let totalMet = 0;
 let totalAbandoned = 0;
@@ -108,6 +142,9 @@ for (const file of files) {
   }
   let changed = false;
 
+  const withChecks = gates.filter(g => g.check);
+  const trusted = statusOnly || !withChecks.length || isTrusted(file, gates, withChecks);
+
   for (const gate of gates) {
     const isAbandoned = abandoned.has(gate.id);
     const pendingEvidence = !gate.evidence || /^pending$/i.test(gate.evidence);
@@ -115,7 +152,7 @@ for (const file of files) {
     if (isAbandoned) { totalAbandoned++; continue; }
 
     // Run checks for gates that are unchecked, or checked but missing evidence.
-    const needsRun = !statusOnly && gate.check && (!gate.checked || pendingEvidence);
+    const needsRun = trusted && !statusOnly && gate.check && (!gate.checked || pendingEvidence);
     if (needsRun) {
       const res = spawnSync(gate.check, {
         shell: true, encoding: "utf8", timeout: timeoutSec * 1000,
