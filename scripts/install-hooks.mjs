@@ -22,7 +22,9 @@ const global_ = args.includes("--global");
 const shared = args.includes("--shared");
 
 const hookScript = join(dirname(fileURLToPath(import.meta.url)), "stop-hook.mjs");
-const MARKER = "unlazy"; // identifies our entries: command mentions unlazy + stop-hook.mjs
+const MARKER = "unlazy"; // passed to the hook as an ignored argv tag, so identification
+                         // never depends on the skill living in a path named "unlazy"
+                         // (an argument, not a shell comment: cmd.exe has no "#")
 
 const target = global_
   ? join(homedir(), ".claude", "settings.json")
@@ -43,7 +45,9 @@ const stopHooks = Array.isArray(settings.hooks.Stop) ? settings.hooks.Stop : [];
 const isOurs = (entry) =>
   Array.isArray(entry?.hooks) &&
   entry.hooks.some(h => typeof h?.command === "string" &&
-    h.command.includes("stop-hook.mjs") && h.command.toLowerCase().includes(MARKER));
+    h.command.includes("stop-hook.mjs") &&
+    // marker in the command, or, for entries written before it existed, our own path
+    (h.command.toLowerCase().includes(MARKER) || h.command.includes(hookScript)));
 
 const kept = stopHooks.filter(e => !isOurs(e));
 
@@ -63,7 +67,7 @@ if (uninstall) {
 const entry = {
   hooks: [{
     type: "command",
-    command: `node "${hookScript}"`,
+    command: `node "${hookScript}" --${MARKER}`,
     timeout: 20,
   }],
 };
@@ -78,7 +82,7 @@ mkdirSync(dirname(target), { recursive: true });
 writeFileSync(target, JSON.stringify(settings, null, 2) + "\n");
 
 console.log(`Installed unlazy Stop hook into ${target}
-  command: node "${hookScript}"
+  command: node "${hookScript}" --${MARKER}
   effect:  while GATES.md or gates/*.md in the working directory contain unmet
            gates, ending the turn is blocked (max 6 blocks without progress,
            ABANDON lines are honored as an honest exit).
