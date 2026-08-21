@@ -20,7 +20,8 @@ const statusOnly = args.includes("--status");
 let timeoutSec = 120;
 const tIdx = args.indexOf("--timeout");
 if (tIdx !== -1) timeoutSec = Number(args[tIdx + 1]) || 120;
-const fileArgs = args.filter((a, i) => !a.startsWith("--") && i !== tIdx + 1);
+const tValIdx = tIdx === -1 ? -1 : tIdx + 1; // --timeout's value is not a file
+const fileArgs = args.filter((a, i) => !a.startsWith("--") && i !== tValIdx);
 
 function defaultFiles(dir) {
   const found = [];
