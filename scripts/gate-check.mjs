@@ -11,16 +11,17 @@
 // CHECK lines are shell commands living in a markdown file. A gate file you did
 // not write is untrusted input, so its commands are printed, not run, until you
 // approve them once with --approve. Approvals are keyed to the exact command set
-// (recorded in .unlazy-approved.json); editing a CHECK line revokes them.
+// (recorded under ~/.unlazy/approved); editing a CHECK line revokes them.
 //
 // Files default to GATES.md plus gates/*.md in the current directory.
 // Exit codes: 0 = all gates met (or honestly abandoned), 1 = unmet gates remain,
 //             2 = usage or parse error.
 
-import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 
 const args = process.argv.slice(2);
 const statusOnly = args.includes("--status");
@@ -98,18 +99,20 @@ function tail(output, max = 200) {
   return (last || "(no output)").slice(0, max);
 }
 
-const APPROVALS = join(process.cwd(), ".unlazy-approved.json");
-const commandHash = (gates) =>
-  createHash("sha256").update(gates.map(g => g.check || "").join("\n")).digest("hex").slice(0, 16);
+// Approval state lives in the user's home, never in the directory being
+// checked: whoever can ship you a GATES.md can ship an approval record next to
+// it. One empty file per (gate file, command set) pair, so leaves approving in
+// parallel cannot overwrite each other the way a shared JSON map would.
+const APPROVED_DIR = join(homedir(), ".unlazy", "approved");
+const sha = (text) => createHash("sha256").update(text).digest("hex").slice(0, 16);
+const commandHash = (gates) => sha(gates.map(g => g.check || "").join("\n"));
 
 // Consent gate: execute a file's CHECK commands only once they have been read
 // and approved. Keyed to the command set, so a tampered CHECK re-asks.
 function isTrusted(file, gates, withChecks) {
   const key = resolve(file);
-  const hash = commandHash(gates);
-  let approvals = {};
-  try { approvals = JSON.parse(readFileSync(APPROVALS, "utf8")); } catch { /* none yet */ }
-  if (approvals[key] === hash) return true;
+  const token = join(APPROVED_DIR, `${sha(key)}-${commandHash(gates)}`);
+  if (existsSync(token)) return true;
 
   console.log(`${file}: ${withChecks.length} shell command(s) from this file:`);
   for (const g of withChecks) console.log(`    ${g.id}: ${g.check}`);
@@ -117,9 +120,10 @@ function isTrusted(file, gates, withChecks) {
     console.log("  NOT RUN - unapproved. Read the commands above, then re-run with --approve.");
     return false;
   }
-  approvals[key] = hash;
-  try { writeFileSync(APPROVALS, JSON.stringify(approvals, null, 2) + "\n"); }
-  catch (e) { console.error(`  (could not record approval: ${e.message})`); }
+  try {
+    mkdirSync(APPROVED_DIR, { recursive: true });
+    writeFileSync(token, `${key}\n`);
+  } catch (e) { console.error(`  (could not record approval: ${e.message})`); }
   console.log("  approved.");
   return true;
 }
