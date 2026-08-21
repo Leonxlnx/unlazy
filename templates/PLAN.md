@@ -13,17 +13,35 @@ Decided BEFORE fan-out. Everything a leaf could get wrong about its neighbors:
 
 ## Tree
 
+State is one of READY, IN-FLIGHT, VERIFIED, ABANDONED. Update it in-place as
+the driver dispatches and verifies; the status log below is append-only but
+the State column here is mutable so the driver can scan readiness at a glance.
+
+Needs lists the leaf ids that must be Verified before this leaf can dispatch.
+Leave empty (or "-") for independent leaves; dependencies are the exception,
+not the rule — prefer zero.
+
 - 1 <task>
-  - 1.1 <branch> .......... gates/node-1.1.md
-    - 1.1.1 <leaf> ........ gates/leaf-1.1.1.md
-    - 1.1.2 <leaf> ........ gates/leaf-1.1.2.md
-  - 1.2 <branch> .......... gates/node-1.2.md
-    - 1.2.1 <leaf> ........ gates/leaf-1.2.1.md
-    - 1.2.2 <leaf> ........ gates/leaf-1.2.2.md
+  - 1.1 <branch> .......... gates/leaf-1.1.md          Needs: -          State: READY
+    - 1.1.1 <leaf> ........ gates/leaf-1.1.1.md        Needs: -          State: READY
+    - 1.1.2 <leaf> ........ gates/leaf-1.1.2.md        Needs: -          State: READY
+  - 1.2 <branch> .......... gates/leaf-1.2.md          Needs: -          State: READY
+    - 1.2.1 <leaf> ........ gates/leaf-1.2.1.md        Needs: -          State: READY
+    - 1.2.2 <leaf> ........ gates/leaf-1.2.2.md        Needs: 1.2.1      State: BLOCKED
 
 ## Status log
 
-Append-only. One line per event: leaf started, leaf verified, gate abandoned.
-Never rewrite lines above; appending keeps the file cheap to re-read and diff.
+Append-only. One line per event. The State column above is the live snapshot;
+this log is the history, so you can reconstruct what happened and when.
 
-- <timestamp or step> plan written, contract fixed
+Mandated events to log:
+- leaf dispatched:  "<step> <leaf-id> dispatched"
+- leaf verified:   "<step> <leaf-id> verified (<N>/<N> gates met)"
+- leaf abandoned:   "<step> <leaf-id> abandoned: <which gates, why>"
+- branch integrated: "<step> <branch-id> integration gates met"
+
+Never rewrite lines above; appending keeps the file cheap to re-read and diff.
+The step counter is monotonic (starts at 1, steps every event regardless of
+which leaf) so any two log lines can be compared for ordering.
+
+- 1 plan written, contract fixed
