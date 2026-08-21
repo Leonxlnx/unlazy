@@ -49,6 +49,13 @@ const isOurs = (entry) =>
     // marker in the command, or, for entries written before it existed, our own path
     (h.command.toLowerCase().includes(MARKER) || h.command.includes(hookScript)));
 
+// Ours AND still pointing at this copy of the script. An entry left behind by
+// an install that has since moved is ours, but stale: it must be replaced, not
+// reported as already installed, or enforcement is silently off.
+const isCurrent = (entry) =>
+  Array.isArray(entry?.hooks) &&
+  entry.hooks.some(h => typeof h?.command === "string" && h.command.includes(hookScript));
+
 const kept = stopHooks.filter(e => !isOurs(e));
 
 if (uninstall) {
@@ -72,7 +79,7 @@ const entry = {
   }],
 };
 
-if (stopHooks.some(isOurs)) {
+if (stopHooks.some(isCurrent)) {
   console.log(`Already installed in ${target} (idempotent, nothing changed).`);
   process.exit(0);
 }
