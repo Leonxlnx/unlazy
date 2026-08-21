@@ -20,7 +20,9 @@ const statusOnly = args.includes("--status");
 let timeoutSec = 120;
 const tIdx = args.indexOf("--timeout");
 if (tIdx !== -1) timeoutSec = Number(args[tIdx + 1]) || 120;
-const fileArgs = args.filter((a, i) => !a.startsWith("--") && i !== tIdx + 1);
+// indexOf returns -1 when --timeout is absent, so guard the skip: without this,
+// `i !== tIdx + 1` excludes argv index 0 and swallows the first file argument.
+const fileArgs = args.filter((a, i) => !a.startsWith("--") && (tIdx === -1 || i !== tIdx + 1));
 
 function defaultFiles(dir) {
   const found = [];
