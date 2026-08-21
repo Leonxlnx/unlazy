@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0 (2026-08-21)
+
+Orchestrated mode was too slow because it processed leaves sequentially and re-ran the whole gate tree on every verify pass. Both are fixed, backward compatibly. Single-leaf checkers and solo mode keep the same behavior and exit codes.
+
+New:
+
+- **`gate-check.mjs --jobs <N>`**: max concurrent CHECK executions. Backed by an async `spawn` sliding-window limiter (replaces the blocking `spawnSync` loop). Default 1 = sequential, so existing invocations are unchanged. Bad `--jobs` value exits 2 (usage error), consistent with the existing exit-code contract.
+- **Orchestration: rolling dispatch.** The driver loop in `references/orchestration.md` now launches all ready leaves at once, verifies each scoped to its own gate file (with `--jobs` for batch returns), and immediately dispatches anything a returned leaf unblocks — no lockstep. Parallelism is the default behavior, not an opt-in. Dependencies are explicit via the new PLAN.md fields and never a chain longer than two.
+- **`templates/PLAN.md` readiness tracking.** Tree entries now carry `State` (READY / IN-FLIGHT / VERIFIED / ABANDONED) and `Needs` (leaf ids that must be Verified before this leaf dispatches). The status log gains a monotonic step counter and mandated event types (dispatched / verified / abandoned / branch-integrated).
+
+Kept unchanged: `scripts/stop-hook.mjs` (its global gate scan is correct for an exit gate, even though per-leaf verification is now scoped), `scripts/install-hooks.mjs`, `references/{method,gates,token-economy}.md`, all gate-file formats, exit codes.
+
 ## 2.0.0 (2026-08-10)
 
 Enforcement moved from prose into files, checks and an optional hook. Motivated by a controlled six-run test of v1 (two build tasks, three conditions each, independent code review plus adversarial verification plus live browser testing) whose headline results are in the README.
