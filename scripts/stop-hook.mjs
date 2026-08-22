@@ -1,97 +1,94 @@
 #!/usr/bin/env node
-// stop-hook.mjs : Claude Code Stop hook for the unlazy skill (v2).
+// stop-hook.mjs : Claude Code Stop hook for the unlazy skill (v2.1).
 //
-// Structurally blocks ending the turn while GATES.md / gates/*.md contain
-// unmet gates. Zero tokens: this is a file scan, not a model call.
+// Structurally blocks ending the turn while THIS pipeline's gates are unmet.
+// Zero tokens: a file scan, not a model call.
+//
+// Usage in a Stop hook command:
+//   node stop-hook.mjs                  guard whichever pipeline this session owns
+//   node stop-hook.mjs --scope api      guard .unlazy/api/ specifically
+//
+// Only --scope is read. Any other argument is ignored, including the "--unlazy"
+// tag the installer appends so its own entries stay identifiable in settings
+// without depending on the install path.
+//
+// Scope resolution, in order: --scope, UNLAZY_SCOPE, the session binding in
+// .unlazy/<scope>/session, the only pipeline present, else the legacy
+// GATES.md + gates/*.md layout under cwd.
 //
 // Behavior:
-//   - No gate files in cwd            -> allow (skill not active here)
-//   - All gates met or abandoned      -> allow
-//   - Unmet gates, progress happening -> block with a one-line reason
-//   - Unmet gates, NO progress after MAX_BLOCKS consecutive blocks -> allow
-//     with a warning (never traps a genuinely stuck agent; Claude Code
-//     additionally force-releases after 8 consecutive blocks)
+//   - No gate files                       -> allow (skill not active here)
+//   - Scope cannot be resolved            -> allow, with a note. A session is
+//     never blocked by a pipeline it does not own; that is the whole point of
+//     scoping, and blocking on someone else's work is unactionable.
+//   - All gates met or abandoned          -> allow
+//   - Unmet gates, progress happening     -> block, naming file-qualified ids
+//   - Unmet gates, no progress after MAX_BLOCKS consecutive blocks -> allow
+//     with a warning (never traps a genuinely stuck agent; Claude Code also
+//     force-releases after 8 consecutive blocks)
 //
-// Progress = the combined content of the gate files changed since last block.
-// State lives in .unlazy-hook-state.json next to the gates (add to .gitignore).
+// Progress = this scope's gate files changed since the last block. The counter
+// lives in .unlazy/<scope>/hook-state.json, one per pipeline, so pipelines
+// cannot reset or exhaust each other's loop guard.
 //
 // Contract (docs: code.claude.com/docs/en/hooks):
-//   stdin  JSON with { cwd, stop_hook_active, ... }
-//   stdout {"decision":"block","reason":"..."} + exit 0 to block; exit 0 silent to allow.
+//   stdin  JSON with { cwd, session_id, stop_hook_active, ... }
+//   stdout {"decision":"block","reason":"..."} + exit 0 to block;
+//          exit 0 with no output to allow.
 
-import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import {
+  parseGates, qualify, gateState, resolveTarget, hookStatePath, UNLAZY_DIR,
+} from "./lib/gates.mjs";
 
 const MAX_BLOCKS = 6;
 
-function readStdin() {
-  try { return readFileSync(0, "utf8"); } catch { return "{}"; }
-}
+const args = process.argv.slice(2);
+const scopeArg = (() => {
+  const i = args.indexOf("--scope");
+  return i !== -1 ? args[i + 1] : null;
+})();
 
 let payload = {};
-try { payload = JSON.parse(readStdin() || "{}"); } catch { /* stay permissive */ }
-const cwd = payload.cwd || process.cwd();
+try { payload = JSON.parse(readFileSync(0, "utf8") || "{}"); } catch { /* stay permissive */ }
+const root = payload.cwd || process.cwd();
+const sessionId = payload.session_id || payload.sessionId || null;
 
-function gateFiles(dir) {
-  const found = [];
-  const top = join(dir, "GATES.md");
-  if (existsSync(top)) found.push(top);
-  const gdir = join(dir, "gates");
-  if (existsSync(gdir)) {
-    try {
-      for (const f of readdirSync(gdir)) if (f.endsWith(".md")) found.push(join(gdir, f));
-    } catch { /* ignore */ }
-  }
-  return found;
+const allow = (msg) => {
+  if (msg) console.log(JSON.stringify({ systemMessage: msg }));
+  process.exit(0);
+};
+
+const target = resolveTarget({ root, scope: scopeArg, sessionId });
+
+if (target.ambiguous) {
+  allow("unlazy: " + target.ambiguous.length + " pipelines under " + UNLAZY_DIR +
+    "/ (" + target.ambiguous.join(", ") + ") and none bound to this session; " +
+    "not blocking. Bind one with UNLAZY_SCOPE or install the hook with --scope <id>.");
 }
-
-const files = gateFiles(cwd);
-if (!files.length) process.exit(0); // no gates, nothing to enforce
-
-const GATE_RE = /^- \[( |x|X)\] (.*)$/;
-const EVIDENCE_RE = /^\s+EVIDENCE:\s?(.*)$/;
-const ABANDON_RE = /^ABANDON:\s*(\S+)/;
+if (target.error || !target.files.length) allow(null);
 
 let combined = "";
 const unmet = [];
 
-for (const file of files) {
+for (const file of target.files) {
   let text = "";
   try { text = readFileSync(file, "utf8"); } catch { continue; }
   combined += text;
-  const lines = text.split(/\r?\n/);
-  const abandoned = new Set(
-    lines.map(l => (l.match(ABANDON_RE) || [])[1]).filter(Boolean).map(s => s.replace(/:$/, ""))
-  );
-  let cur = null; // { id, checked, evidence }
-  const flush = () => {
-    if (!cur || abandoned.has(cur.id)) { cur = null; return; }
-    const pending = cur.evidence === null || /^pending$/i.test(cur.evidence);
-    if (!cur.checked || pending) unmet.push(cur.id);
-    cur = null;
-  };
-  for (const line of lines) {
-    const g = line.match(GATE_RE);
-    if (g) {
-      flush();
-      cur = {
-        checked: g[1].toLowerCase() === "x",
-        id: (g[2].match(/^(\S+?):/) || [null, g[2].trim().slice(0, 24)])[1],
-        evidence: null,
-      };
-      continue;
-    }
-    const ev = cur && line.match(EVIDENCE_RE);
-    if (ev) cur.evidence = ev[1].trim();
+  const doc = parseGates(text);
+  for (const g of doc.gates) {
+    const st = gateState(g, doc.abandoned);
+    // Qualified ids: "G1" alone is ambiguous the moment a tree has more than
+    // one gate file, which makes an otherwise correct block unactionable.
+    if (st === "unmet" || st === "unmet-no-evidence") unmet.push(qualify(file, g.id));
   }
-  flush();
 }
 
 if (!unmet.length) process.exit(0); // everything met or honestly abandoned
 
-// Progress-aware loop guard.
-const statePath = join(cwd, ".unlazy-hook-state.json");
+// Progress-aware loop guard, per pipeline.
+const statePath = hookStatePath(root, target.scope);
 const hash = createHash("sha256").update(combined).digest("hex").slice(0, 16);
 let state = { hash: "", blocks: 0 };
 try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch { /* fresh */ }
@@ -99,17 +96,21 @@ if (state.hash !== hash) state = { hash, blocks: 0 }; // progress -> reset count
 state.blocks += 1;
 try { writeFileSync(statePath, JSON.stringify(state)); } catch { /* non-fatal */ }
 
+const where = target.scope ? " [scope " + target.scope + "]" : "";
+
 if (state.blocks > MAX_BLOCKS) {
-  // No progress across MAX_BLOCKS consecutive stops: release rather than trap.
-  console.log(JSON.stringify({
-    systemMessage: `unlazy: releasing after ${MAX_BLOCKS} blocks without gate progress; ${unmet.length} gates remain unmet (${unmet.slice(0, 4).join(", ")}).`,
-  }));
-  process.exit(0);
+  allow("unlazy: releasing after " + MAX_BLOCKS + " blocks without gate progress" +
+    where + "; " + unmet.length + " gates remain unmet (" + unmet.slice(0, 4).join(", ") + ").");
 }
 
-const list = unmet.slice(0, 5).join(", ") + (unmet.length > 5 ? `, +${unmet.length - 5} more` : "");
+const list = unmet.slice(0, 5).join(", ") +
+  (unmet.length > 5 ? ", +" + (unmet.length - 5) + " more" : "");
 console.log(JSON.stringify({
   decision: "block",
-  reason: `unlazy: ${unmet.length} gate(s) unmet: ${list}. Work the next unchecked gate (run gate-check.mjs to execute CHECK lines), or add "ABANDON: <id> <reason>" if one is genuinely impossible. Done means every box checked with evidence.`,
+  reason: "unlazy" + where + ": " + unmet.length + " gate(s) unmet: " + list +
+    '. Work the next unchecked gate (run gate-check.mjs' +
+    (target.scope ? " --scope " + target.scope : "") +
+    ' to execute CHECK lines), or add "ABANDON: <id> <reason>" if one is ' +
+    "genuinely impossible. Done means every box checked with evidence.",
 }));
 process.exit(0);

@@ -2,7 +2,7 @@
 
 # unlazy
 
-**An anti-laziness skill for AI agents. v2: enforced, not requested.**
+**An anti-laziness skill for AI agents. v2.1: enforced, not requested, and safe to run in parallel.**
 
 v1 told the model to work harder. v2 makes half-done structurally visible:
 acceptance gates live in files, checks run as commands, and an optional hook
@@ -10,10 +10,14 @@ blocks the agent from declaring victory while gates are unmet.
 
 You do not promise you are done. You prove it against a ledger.
 
+v2.1 makes that ledger safe under concurrency. Each pipeline gets its own scope,
+file ownership is a checked lease rather than a promise in a plan, and gate files
+survive being written while another run is in flight.
+
 Works with Claude Code, OpenAI Codex, Cursor and anything else that reads `SKILL.md`.
 Hard enforcement (the Stop hook) is Claude Code only; everything else is plain markdown and Node.
 
-[Use it](#use-it) · [What changed in v2](#what-changed-in-v2-and-why) · [How it works](#how-it-works) · [The method](#the-depth-tree-v2) · [Costs](#what-it-costs) · [Research](#the-research)
+[Use it](#use-it) · [Parallel pipelines](#parallel-pipelines) · [What changed in v2](#what-changed-in-v2-and-why) · [How it works](#how-it-works) · [The method](#the-depth-tree-v2) · [Costs](#what-it-costs) · [Research](#the-research)
 
 </div>
 
@@ -67,7 +71,7 @@ node <path-to-skill>/scripts/install-hooks.mjs --global   # every project
 node <path-to-skill>/scripts/install-hooks.mjs --uninstall
 ```
 
-It is a millisecond file scan, zero tokens per check. If the agent makes no gate progress across six consecutive blocked stops, the hook releases it with a warning instead of trapping it, and an `ABANDON: <gate> <reason>` line is always honored as an honest exit. Add `.unlazy-hook-state.json` to your `.gitignore`.
+Add `--scope <id>` to pin the hook to one pipeline. It is a millisecond file scan, zero tokens per check. If the agent makes no gate progress across six consecutive blocked stops, the hook releases it with a warning instead of trapping it, and an `ABANDON: <gate> <reason>` line is always honored as an honest exit. A pipeline this session does not own never blocks it. Add `.unlazy/` to your `.gitignore`.
 
 ### Or let your agent install it
 
@@ -86,6 +90,54 @@ Then confirm it worked: show me the installed path and the first line of the
 skill's description. Do not tell me it is installed unless you have actually
 verified the file is on disk.
 ```
+
+## Parallel pipelines
+
+Running leaves at the same time is only safe if two things hold: no two of them write the same file, and the ledger survives being written from more than one place. v2.1 provides both, and leaves the scheduling to whatever dispatches the leaves.
+
+**Ownership is a lease, not a promise.** Each leaf declares what it may write:
+
+```markdown
+OWNS: src/api/**, tests/api/*.test.ts
+```
+
+```bash
+node scripts/gate-check.mjs --scope api --leaf leaf-1.2.1 --claim
+# CONFLICT src/shared/util.ts overlaps src/shared/** held by web/leaf-1
+# CLAIM REFUSED (1 conflict(s))          <- exit 3
+```
+
+The claim is checked against every other leaf in every pipeline, so "no two leaves touch the same file" is enforced rather than assumed by the dispatcher.
+
+**Across pipelines.** One scope per pipeline under `.unlazy/<scope>/`, selected by `--scope` or `UNLAZY_SCOPE`. Separate gates, separate status log, separate loop-guard counter, separate leases. Nothing in one scope can read, write or block another. When the scope is ambiguous the tools refuse rather than guess:
+
+```
+$ node scripts/gate-check.mjs
+gate-check: 2 pipelines present (api, web); pass --scope <id> or set UNLAZY_SCOPE.
+Refusing to run every pipeline's checks at once.
+```
+
+Prefer one `git worktree` per pipeline whenever the checks build anything: parallel builds in one tree just serialise on the toolchain's lock while looking busy.
+
+Full guide: [references/parallel.md](references/parallel.md).
+
+## What v2.1 changed
+
+Three defects in v2.0 made concurrent runs unsafe. Each is now covered by a test in `tests/run-tests.mjs`.
+
+| Defect in v2.0 | Effect | Fix |
+|---|---|---|
+| `gate-check` dropped its first file argument unless `--timeout` was passed (index arithmetic in the arg filter) | A scoped call fell back to "every gate file in the tree" and printed `ALL MET` for work it never looked at | A real argument parser; unknown options are an error |
+| Gate files were discovered by one glob over the working directory | A leaf running its own checks executed and rewrote every sibling's gates, so a leaf could certify a sibling it had never read | Scopes: discovery never crosses a pipeline boundary, and ambiguity is refused |
+| The Stop hook scanned the whole directory and kept one global loop-guard counter | A finished session was blocked by an unrelated pipeline's gates, reported as a bare `G1`, while pipelines reset each other's counter | Per-scope resolution, per-scope counter, file-qualified ids, and never blocking on a pipeline this session does not own |
+
+Also fixed: `install-hooks.mjs` identified its own entries by looking for the literal word "unlazy" in the hook's file path, so vendoring or renaming the skill made it stack duplicate hooks and fail to uninstall. It now matches the hook script's actual path, and still recognises entries written by upstream v2.0.
+
+Added: `OWNS:` with `--claim` and `--release`, `CWD:`, `--log`, `--bind`, `--list-scopes`, atomic delta writes under a file lock, and `tests/run-tests.mjs` (26 tests). Parsing and scope resolution moved into `scripts/lib/gates.mjs` so the checker and the hook cannot disagree about what a gate is.
+
+Deliberately not here: concurrent execution of a leaf's own checks, and leaf dispatch order. [#5](https://github.com/Leonxlnx/unlazy/pull/5) already implements both, with a sliding-window `--jobs` limiter and rolling dispatch, and rolling beats any fixed batching. This PR is the layer underneath: the guarantees that make running them at once safe.
+
+The legacy layout (`GATES.md` + `gates/*.md` in the working directory) still works unchanged, so solo mode needs no migration.
 
 ## What changed in v2, and why
 
@@ -162,18 +214,27 @@ references/
   method.md                    the Depth Tree v2 in full
   gates.md                     gate file format spec and writing guide
   orchestration.md             leaves as fresh agents, verification hierarchy
+  parallel.md                  scopes, leases, safe concurrent writes
   token-economy.md             cost discipline, measured
 templates/
   PLAN.md                      contract + tree + append-only status log
-  gates-leaf.md                per-leaf gates
+  gates-leaf.md                per-leaf gates, with OWNS
   gates-node.md                per-branch integration gates
 scripts/
   gate-check.mjs               runs CHECK commands, flips boxes, records evidence
   stop-hook.mjs                Claude Code Stop hook: blocks stop while gates unmet
   install-hooks.mjs            idempotent hook install/uninstall
+  lib/gates.mjs                shared parsing, scope resolution, locks, leases
+tests/
+  run-tests.mjs                26 behavioural tests; prints "N/N passed"
 ```
 
-All scripts are zero-dependency Node 16+, tested on Windows and POSIX shells.
+All scripts are zero-dependency Node 16+, tested on Windows and POSIX shells:
+
+```bash
+node tests/run-tests.mjs
+# 26/26 passed
+```
 
 ## The problem: model laziness is real and measured
 
