@@ -40,10 +40,17 @@ if (existsSync(target)) {
 settings.hooks = settings.hooks || {};
 const stopHooks = Array.isArray(settings.hooks.Stop) ? settings.hooks.Stop : [];
 
+// Identify our entries by this script's own sibling hook path first. Matching on
+// the literal word "unlazy" only works while the skill sits under a directory of
+// that name: vendor it, rename it, or install it anywhere else and the installer
+// stops recognising its own entries, so every install stacks another hook and
+// uninstall reports nothing to remove. The word is still accepted so hooks
+// written from an "unlazy" directory stay removable from either install.
 const isOurs = (entry) =>
   Array.isArray(entry?.hooks) &&
   entry.hooks.some(h => typeof h?.command === "string" &&
-    h.command.includes("stop-hook.mjs") && h.command.toLowerCase().includes(MARKER));
+    (h.command.includes(hookScript) ||
+      (h.command.includes("stop-hook.mjs") && h.command.toLowerCase().includes(MARKER))));
 
 const kept = stopHooks.filter(e => !isOurs(e));
 
