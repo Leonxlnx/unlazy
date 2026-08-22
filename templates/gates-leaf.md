@@ -1,5 +1,7 @@
 # Gates: <leaf or task name>
 
+OWNS: <globs this leaf may write, e.g. src/api/**, tests/api/*.test.ts>
+
 Scope: <one line: what this unit of work delivers>
 
 - [ ] G1: <observable outcome, stated so a stranger could judge it>
@@ -7,9 +9,10 @@ Scope: <one line: what this unit of work delivers>
   EXPECT: <substring the command output must contain, or /regex/>
   EVIDENCE: pending
 
-- [ ] G2: <another runnable outcome>
+- [ ] G2: <an outcome proven somewhere other than the root>
   CHECK: <command>
-  EXPECT: <substring or /regex/>
+  EXPECT: <the line that can only appear on success>
+  CWD: <subdirectory>
   EVIDENCE: pending
 
 - [ ] G3: <manual gate, when no command can prove it>
@@ -21,6 +24,11 @@ Rules (full spec in references/gates.md):
   matches EXPECT, or by hand for manual gates.
 - A checked box with EVIDENCE still reading "pending" counts as UNMET.
 - Evidence is the deciding lines only, never a full log.
+- EXPECT must match a line that can only appear on success. "done" appears
+  either way; "8/8 passed" does not.
+- CWD: <dir> runs one check somewhere other than the root.
+- OWNS is only needed when leaves run in parallel: it makes file ownership
+  checkable via --claim instead of promised in PLAN.md. See references/parallel.md.
 - If a gate becomes impossible, do not delete it. Add a line:
     ABANDON: G<n> <reason>
   and report it. Visible surrender is honest; silent scope-narrowing is not.
