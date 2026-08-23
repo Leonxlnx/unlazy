@@ -176,6 +176,19 @@ test("validation: malformed ids, handles, and state fail closed", async () => {
   } finally { s.cleanup(); }
 });
 
+test("validation: legal ids cannot collide with object prototypes", async () => {
+  const s = sandbox();
+  try {
+    const special = ["open", "--scope", "api", "--wave", "toString"];
+    let result = await run([...special, "--leaf", "constructor"], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    result = await run(["start", "--scope", "api", "--wave", "toString", "--leaf", "constructor", "--handle", "codex:special"], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    result = await run(["seal", "--scope", "api", "--wave", "toString"], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+  } finally { s.cleanup(); }
+});
+
 test("hook: an incomplete dispatch wave blocks an otherwise complete scope", async () => {
   const s = sandbox();
   try {

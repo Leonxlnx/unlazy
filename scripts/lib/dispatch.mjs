@@ -10,7 +10,8 @@ const SCHEMA = 1;
 const STATES = new Set(["open", "sealed", "complete"]);
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
-const emptyState = () => ({ schema: SCHEMA, waves: {} });
+const record = (value = {}) => Object.assign(Object.create(null), value);
+const emptyState = () => ({ schema: SCHEMA, waves: record() });
 const count = (record) => Object.keys(record).length;
 
 function fail(message) { throw new Error(message); }
@@ -40,6 +41,7 @@ function validateState(state) {
       !state.waves || typeof state.waves !== "object" || Array.isArray(state.waves)) {
     fail("expected schema 1 with a waves object");
   }
+  state.waves = record(state.waves);
 
   for (const [waveId, wave] of Object.entries(state.waves)) {
     validId(waveId, "wave");
@@ -49,6 +51,8 @@ function validateState(state) {
         !wave.returned || typeof wave.returned !== "object" || Array.isArray(wave.returned)) {
       fail("wave " + waveId + " has an invalid shape");
     }
+    wave.started = record(wave.started);
+    wave.returned = record(wave.returned);
     validTime(wave.openedAt, "wave " + waveId + " openedAt");
     const leaves = new Set();
     for (const leaf of wave.leaves) {
@@ -137,7 +141,7 @@ export async function updateDispatch(root, spec) {
         if (seen.has(leaf)) fail("duplicate leaf " + leaf);
         seen.add(leaf);
       }
-      state.waves[waveId] = { leaves, state: "open", openedAt: now, started: {}, returned: {} };
+      state.waves[waveId] = { leaves, state: "open", openedAt: now, started: record(), returned: record() };
       event = "dispatch " + waveId + " opened: " + leaves.join(", ");
     } else {
       const current = state.waves[waveId];
