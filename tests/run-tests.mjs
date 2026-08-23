@@ -346,6 +346,43 @@ test("hook: each pipeline keeps its own loop-guard counter", async () => {
   } finally { s.cleanup(); }
 });
 
+test("hook: the loop guard tracks gate state, not file bytes", async () => {
+  const s = sandbox();
+  try {
+    // A cosmetic edit is not progress. Keying the guard to raw bytes let any
+    // touch of the ledger reset the counter, so an agent that keeps editing
+    // without meeting a gate is never released. Re-running the checker did the
+    // same thing by rewriting evidence text.
+    s.write(".unlazy/api/gates/leaf-1.md", "# Gates\n\n" + gate("G1", "a", null, null) + gate("G2", "b", null, null));
+    const stdin = JSON.stringify({ cwd: s.dir });
+    for (let i = 0; i < 6; i++) {
+      const blocked = await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+      assertHas(blocked.out, '"decision":"block"');
+    }
+    s.write(".unlazy/api/gates/leaf-1.md",
+      s.read(".unlazy/api/gates/leaf-1.md") + "\n<!-- still thinking about it -->\n");
+    const afterCosmetic = await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+    assertHas(afterCosmetic.out, "releasing after 6 blocks");
+  } finally { s.cleanup(); }
+});
+
+test("hook: meeting a gate resets the loop guard", async () => {
+  const s = sandbox();
+  try {
+    // The converse of the test above: real progress must still rearm the guard,
+    // or a long run would be released while it is genuinely advancing.
+    s.write(".unlazy/api/gates/leaf-1.md", "# Gates\n\n" + gate("G1", "a", null, null) + gate("G2", "b", null, null));
+    const stdin = JSON.stringify({ cwd: s.dir });
+    for (let i = 0; i < 3; i++) await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+    s.write(".unlazy/api/gates/leaf-1.md",
+      "# Gates\n\n- [x] G1: a\n  EVIDENCE: measured 3 of 3\n\n" + gate("G2", "b", null, null));
+    for (let i = 0; i < 4; i++) {
+      const blocked = await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+      assertHas(blocked.out, '"decision":"block"');
+    }
+  } finally { s.cleanup(); }
+});
+
 test("hook: no gate files anywhere means silence", async () => {
   const s = sandbox();
   try {

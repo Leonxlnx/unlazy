@@ -79,7 +79,7 @@ Offer the hook once when structural stop enforcement would materially help. Neve
 node <skill-dir>/scripts/install-hooks.mjs
 ```
 
-The hook returns Claude Code's top-level `decision: "block"` response while this session's resolved pipeline has unmet gates. Its own session-keyed progress guard releases after six consecutive blocks without ledger progress. Remove it with `--uninstall`.
+The hook returns Claude Code's top-level `decision: "block"` response while this session's resolved pipeline has unmet gates. Its own session-keyed progress guard releases after six consecutive blocks without a change in resolved gate state. Editing a ledger is not progress; meeting, abandoning, or invalidating a gate is. Remove it with `--uninstall`.
 
 Default installation writes machine-specific project-local settings. Keep `.claude/settings.local.json`, `.unlazy/`, and `.unlazy-hook-state.json` in the project's ignore rules. Shared installation contains absolute Node and hook-script paths and is usually not portable across machines. Read [SECURITY.md](SECURITY.md) before choosing an install target.
 

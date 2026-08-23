@@ -65,22 +65,31 @@ if (!target.files.length) {
 
 const unmet = [];
 const invalid = [];
-let combined = "";
+// The loop guard compares resolved gate state between stops, not raw bytes.
+// Byte comparison counted any edit as progress: a comment, a reflowed line, or
+// the checker rewriting an evidence line with a fresh PATH hash. That rearmed
+// the guard indefinitely, so the six-block release could only ever fire for an
+// agent doing literally nothing, which is the one case least in need of it.
+const resolved = [];
 for (const file of [...target.files].sort()) {
   let text;
   try { text = readFileSync(file, "utf8"); }
   catch (error) {
     invalid.push(qualify(file, "PARSE") + " unreadable: " + error.message);
+    resolved.push(qualify(file, "PARSE") + "=unreadable");
     continue;
   }
-  combined += file + "\0" + text + "\0";
   const doc = parseGates(text);
   if (doc.errors.length) {
     invalid.push(qualify(file, "PARSE") + " " + doc.errors.slice(0, 2).join("; "));
+    // Record only that the ledger is invalid. Diagnostic text carries line
+    // numbers, which shift on an unrelated edit and would restore byte coupling.
+    resolved.push(qualify(file, "PARSE") + "=invalid");
     continue;
   }
   for (const gate of doc.gates) {
     const state = gateState(gate, doc.abandoned);
+    resolved.push(qualify(file, gate.id) + "=" + state);
     if (state === "unmet" || state === "unmet-no-evidence") unmet.push(qualify(file, gate.id));
   }
 }
@@ -90,7 +99,7 @@ if (!unmet.length && !invalid.length) {
   allow(null);
 }
 
-const contentHash = sha256(combined + invalid.join("\0")).slice(0, 24);
+const progressHash = sha256(resolved.sort().join("\0")).slice(0, 24);
 let sessionState;
 try {
   sessionState = await withFileLock(root, statePath, () => {
@@ -101,7 +110,7 @@ try {
       state = { schema: 1, sessions: {} };
     }
     let current = state.sessions[sessionKey];
-    if (!current || current.hash !== contentHash) current = { hash: contentHash, blocks: 0 };
+    if (!current || current.hash !== progressHash) current = { hash: progressHash, blocks: 0 };
     current.blocks += 1;
     current.updatedAt = new Date().toISOString();
     state.sessions[sessionKey] = current;

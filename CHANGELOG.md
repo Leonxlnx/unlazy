@@ -30,6 +30,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Add opt-in `--jobs <N>` rolling check concurrency while retaining sequential default behavior and deterministic ledger-order reporting.
 - Add declared readiness states, real `node-*` branch paths, explicit dependencies, and rolling leaf dispatch to the plan and orchestration guide.
 - Key Stop-hook progress state to the session and scope, serialize state changes, and retain unlazy's own six-block no-progress release.
+- Compare resolved gate state between stops rather than raw ledger bytes. A comment, a reflowed line, or a rewritten evidence line no longer counts as progress, so the six-block release can fire for an agent that is editing without advancing.
 
 ### Installer, package, and documentation
 
