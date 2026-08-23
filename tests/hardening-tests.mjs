@@ -17,8 +17,11 @@ const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
 function sandbox() {
-  const dir = mkdtempSync(join(tmpdir(), "unlazy-hardening-"));
-  const approvals = mkdtempSync(join(tmpdir(), "unlazy-approval-"));
+  // macOS and custom TMPDIR values can expose lexical aliases (for example
+  // /var versus /private/var). Match the checker's canonical CWD semantics at
+  // the fixture boundary so every path assertion is portable.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "unlazy-hardening-")));
+  const approvals = realpathSync(mkdtempSync(join(tmpdir(), "unlazy-approval-")));
   return {
     dir, approvals,
     path(rel) { return join(dir, rel); },

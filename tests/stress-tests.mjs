@@ -115,7 +115,11 @@ test("hook: repeated 64-writer bursts are serialized without lost increments", a
       rmSync(s.path(".unlazy-hook-state.json"), { force: true });
       const results = await Promise.all(Array.from({ length: 64 }, () =>
         run(STOP_HOOK, [], { cwd: s.dir, stdin: payload })));
-      assert(results.every((result) => result.code === 0), "round " + round + ": a hook process failed");
+      const crashed = results.filter((result) => result.code !== 0);
+      assert(crashed.length === 0,
+        "round " + round + ": " + crashed.length + " hook process(es) failed\n" +
+        [...new Set(crashed.map((result) => "exit=" + result.code + "\n" + result.out.trim()))]
+          .slice(0, 4).join("\n---\n"));
       const failedUpdates = results
         .filter((result) => result.out.includes("could not update the serialized hook state"))
         .map((result) => result.out.trim());

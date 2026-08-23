@@ -52,7 +52,7 @@ async function clearSessionState() {
       if (!Object.keys(state.sessions).length) {
         try { unlinkSync(statePath); } catch { /* already absent */ }
       } else writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n", { root });
-    });
+    }, { timeoutMs: 15000 });
   } catch {
     // State cleanup must never trap a session after the gates are complete.
   }
@@ -110,7 +110,7 @@ try {
     state.sessions = Object.fromEntries(entries.slice(0, 64));
     writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n", { root });
     return current;
-  });
+  }, { timeoutMs: 15000 });
 } catch (error) {
   allow("unlazy: could not update the serialized hook state (" + error.message + "); not blocking to avoid a trap.");
 }

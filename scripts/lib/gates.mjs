@@ -454,17 +454,24 @@ export async function withFileLock(root, target, fn, options = {}) {
   for (;;) {
     try { fd = openSync(lock, "wx", 0o600); break; }
     catch (error) {
-      if (error.code !== "EEXIST") throw error;
+      // On Windows, opening or inspecting an existing file held by another
+      // process can surface as EPERM/EACCES/EBUSY rather than EEXIST. Treat
+      // only those platform-specific sharing errors as lock contention.
+      if (error.code !== "EEXIST" && !isTransientWindowsFsError(error)) throw error;
       // Never unlink a lock observed by path: between stat and unlink its
       // prior owner can release and a successor can acquire the same name
       // (the classic ABA race). Missing-after-EEXIST simply means retry. A
       // crashed owner's lock fails closed at timeout and can be removed by a
       // human after inspecting its JSON metadata.
+      let missing = false;
       try { statSync(lock); } catch (statError) {
-        if (statError.code === "ENOENT") continue;
-        throw statError;
+        if (statError.code === "ENOENT") missing = true;
+        else if (!isTransientWindowsFsError(statError)) throw statError;
       }
-      if (Date.now() >= deadline) throw new Error("timed out waiting for lock on " + target);
+      if (Date.now() >= deadline) {
+        throw new Error("timed out waiting for lock on " + target + " (last filesystem error: " + error.code + ")");
+      }
+      if (missing && error.code === "EEXIST") continue;
       await sleep(15 + Math.floor(Math.random() * 25));
     }
   }
