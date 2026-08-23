@@ -25,8 +25,8 @@ Use `OPEN`, `VERIFIED`, or `ABANDONED` for branches. Store leaf ledgers as `gate
    ```
 
    A refused claim means the split is not safe for concurrent dispatch. Change the plan or run the work sequentially; never bypass the refusal.
-4. **Dispatch ready leaves.** Give each leaf only the shared contract, its exact ownership and dependencies, its own ledger, and the four-pass completion rule. Do not leak unrelated leaf histories.
-5. **Verify each return independently.** Re-run the returned leaf's runnable gates, including already checked gates:
+4. **Launch each ready wave.** Give each leaf only the shared contract, its exact ownership and dependencies, its own ledger, and the four-pass completion rule. Open a dispatch wave for the independent `READY` leaves, call the host's native nonblocking launch once per leaf, record every host handle, and seal the wave before the first wait or result read. Follow [dispatch.md](dispatch.md); do not leak unrelated leaf histories.
+5. **Verify each return independently.** Record the native return in its wave, then re-run the returned leaf's runnable gates, including already checked gates:
 
    ```text
    node <skill-dir>/scripts/gate-check.mjs --root . --cwd . --reverify .unlazy/<scope>/gates/leaf-1.2.1.md
@@ -53,7 +53,7 @@ Use `--jobs <N>` only when runnable gates are independent and parallel execution
 node <skill-dir>/scripts/gate-check.mjs --root . --cwd . --reverify --jobs 4 .unlazy/<scope>/gates/leaf-1.1.1.md .unlazy/<scope>/gates/leaf-1.1.2.md
 ```
 
-The limit is rolling: start another check when one finishes instead of waiting for a fixed batch. Output and file updates remain deterministic in ledger order. `--jobs` controls command execution, not subagent dispatch and not dependency readiness.
+The limit is rolling: start another check when one finishes instead of waiting for a fixed batch. Output and file updates remain deterministic in ledger order. `--jobs` controls command execution, not subagent dispatch and not dependency readiness. Use [dispatch waves](dispatch.md) for native agent concurrency.
 
 ## Rolling dispatch
 
@@ -61,8 +61,12 @@ Treat dispatch as a loop:
 
 ```text
 while an unverified leaf remains:
-  dispatch each READY leaf whose ownership is claimed
+  collect the independent READY leaves up to the host concurrency limit
+  open a dispatch wave for that exact set
+  launch every native agent and record every returned host handle
+  seal the wave before the first wait
   wait for the next leaf to return
+  record that return in its dispatch wave
   reverify that leaf and review its manual evidence
   append status and update its declared state
   promote each WAITING leaf whose Needs are all VERIFIED
@@ -75,7 +79,7 @@ Do not invent a dependency during dispatch. Add it to `PLAN.md`, correct the aff
 1. **Leaf self-check:** catches ordinary incompleteness but remains self-certification.
 2. **Parent `--reverify`:** executes each runnable oracle again instead of trusting old or manually written evidence.
 3. **Branch integration:** catches locally correct children that do not compose.
-4. **Optional Stop hook:** blocks the driver from ending while its resolved pipeline remains unmet. It scans ledgers; it does not execute checks or validate their meaning.
+4. **Optional Stop hook:** blocks the driver from ending while its resolved pipeline has unmet ledgers or incomplete dispatch waves. It does not execute checks or validate their meaning.
 
 The parent must use the same required toolchain and declared shell. If the environment differs, record and resolve the mismatch instead of accepting old evidence.
 

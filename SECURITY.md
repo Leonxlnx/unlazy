@@ -31,15 +31,15 @@ See [references/gates.md](references/gates.md) for the full shell and success co
 
 ## Scopes and leases are not a sandbox
 
-Scopes limit unlazy's gate discovery, log target, hook association, and lease labels. Ownership leases coordinate tools that voluntarily use the protocol. Neither mechanism prevents a process from reading or writing another path.
+Scopes limit unlazy's gate discovery, log target, hook association, dispatch waves, and lease labels. Ownership leases and dispatch launch barriers coordinate tools that voluntarily use the protocol. Neither mechanism prevents a process from reading or writing another path.
 
 Separate worktrees can reduce ordinary path contention, but they may still share external caches and services. Use operating-system, container, or virtual-machine isolation for untrusted code. See [references/parallel.md](references/parallel.md).
 
 ## Stop hook and local state
 
-The optional Claude Code Stop hook scans ledgers and writes progress state. It does not execute `CHECK:` commands. It emits Claude Code's documented top-level block decision while the resolved session pipeline has unmet gates and releases after unlazy's own six no-progress blocks.
+The optional Claude Code Stop hook scans ledgers and dispatch state, then writes progress state. It does not execute `CHECK:` commands or create agent sessions. It emits Claude Code's documented top-level block decision while the resolved session pipeline has unmet gates or incomplete dispatch waves and releases after unlazy's own six no-progress blocks.
 
-Runtime and binding files live under `.unlazy/` in scoped mode. Legacy mode may use `.unlazy-hook-state.json`. Keep both paths in the project's ignore rules. Session ids in bindings are routing values, not secrets or authentication tokens.
+Runtime, binding, and dispatch files live under `.unlazy/` in scoped mode. Legacy mode may use `.unlazy-hook-state.json`. Keep both paths in the project's ignore rules. Session ids in bindings and native agent ids in dispatch waves are routing values, not secrets or authentication tokens.
 
 ## Installer targets and privacy
 
@@ -55,7 +55,9 @@ Install and uninstall preserve unrelated hooks. The installer refuses malformed 
 
 ## Evidence and logs
 
-Command output can contain private paths or other sensitive text. Gate evidence is deliberately capped, but it is still written into the ledger. Design checks to emit a concise success marker and avoid printing secrets. Review ledgers and status logs before committing or sharing them.
+Command output can contain private paths or other sensitive text. Gate evidence is deliberately capped, but it is still written into the ledger. Dispatch state contains timestamps and opaque host handles. Never put prompts, credentials, or result bodies in a handle. Design checks to emit a concise success marker and avoid printing secrets. Review ledgers, dispatch state, and status logs before committing or sharing them.
+
+A sealed wave proves only that the host returned a distinct native start handle for every declared leaf before Unlazy accepted a return. It does not prove exact CPU overlap, worker honesty, filesystem isolation, successful gates, or correct integration.
 
 Unlazy does not intentionally collect telemetry or send approval, gate, or hook-state records to a service. A `CHECK:` command can perform its own network or logging activity because it is arbitrary code.
 

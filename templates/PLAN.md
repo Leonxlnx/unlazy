@@ -11,6 +11,8 @@ Decide before fan-out:
 - Interfaces: <signatures, schemas, formats, integration points>
 - Ownership: <one complete set of repository-relative paths per leaf; no absolute paths, traversal, or concurrent overlap>
 - Dependencies: <leaf ids that must be VERIFIED first>
+- Host launch mode: <Codex native subagents | Claude background Agents | Claude Dynamic Workflow | sequential fallback>
+- Wave policy: <which independent READY leaves launch together and the maximum host concurrency>
 - Toolchain: <runtime versions, shell, working-directory rules, test commands>
 - Conventions: <naming, errors, compatibility, formatting>
 - Manual review: <owner and evidence standard for consequential manual gates>
@@ -39,7 +41,7 @@ Use `leaf-` paths for work leaves and `node-` paths for branch integration.
     - 1.2.1 <leaf> ...... gates/leaf-1.2.1.md .......... Needs: - ...... State: READY
     - 1.2.2 <leaf> ...... gates/leaf-1.2.2.md .......... Needs: 1.2.1 .. State: WAITING
 
-Every leaf repeats its complete ownership as an `OWNS:` header in its ledger. Claim each concurrently dispatched leaf with `--claim` before changing its state to IN-FLIGHT.
+Every leaf repeats its complete ownership as an `OWNS:` header in its ledger. Claim each concurrently dispatched leaf with `--claim`, then open and seal a native launch wave as described in `references/dispatch.md` before changing its state to IN-FLIGHT.
 
 ## Status log
 

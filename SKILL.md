@@ -32,20 +32,20 @@ Do not silently remove an impossible gate. Add `ABANDON: <id> <non-empty reason>
 ## Pick the smallest fitting mode
 
 - **Solo:** Use one `GATES.md` for a focused task that fits one working session.
-- **Orchestrated:** For a build or deep review, read [references/method.md](references/method.md) and [references/orchestration.md](references/orchestration.md). Write the contract and tree before fan-out. Give every leaf and branch its own gates file.
-- **Parallel:** Before dispatching concurrent leaves or pipelines, also read [references/parallel.md](references/parallel.md). Declare disjoint `OWNS:` paths and claim them. Treat scopes and leases as coordination, never as filesystem isolation or a security boundary.
+- **Orchestrated:** For a build or deep review, read [references/method.md](references/method.md), [references/orchestration.md](references/orchestration.md), and [references/dispatch.md](references/dispatch.md). Write the contract and tree before fan-out. Give every leaf and branch its own gates file.
+- **Parallel:** Before dispatching concurrent leaves or pipelines, also read [references/parallel.md](references/parallel.md). Declare disjoint `OWNS:` paths, claim them, and use a dispatch launch wave. Treat scopes, leases, and wave state as coordination, never as filesystem isolation or a security boundary.
 
-Keep check execution sequential by default. Use `--jobs <N>` only for independent runnable gates when deterministic parallel verification saves wall-clock time. Continue printing and recording results in gate order.
+Keep check execution sequential by default. Use `--jobs <N>` only for independent runnable gates when deterministic parallel verification saves wall-clock time. Continue printing and recording results in gate order. `--jobs` never creates agent sessions; native agent concurrency follows the dispatch contract.
 
 ## Build the Depth Tree
 
 1. Split at natural task boundaries. Use the requested depth only while each leaf remains a coherent deliverable.
 2. Give each leaf a narrow contract, exact file ownership, and its own ledger.
 3. Give each branch integration gates for child verification, interface compatibility, end-to-end behavior, and regressions.
-4. Dispatch only leaves whose declared dependencies are verified and whose ownership claim succeeded.
+4. Dispatch only leaves whose declared dependencies are verified and whose ownership claim succeeded. For each independent `READY` set, open a wave, launch every native agent, record every host handle, seal the wave, and only then wait for a result.
 5. Re-run each returned leaf's runnable gates with `--reverify`; do not mistake `--status` for re-execution.
 
-Use rolling dispatch: when a verified leaf unblocks another, dispatch the newly ready leaf without waiting for unrelated in-flight work. Keep states and dependencies in `PLAN.md`; append events to the scope status log.
+Use rolling dispatch: when a verified leaf unblocks another, open and launch the next ready wave without waiting for unrelated in-flight work. Keep states and dependencies in `PLAN.md`; keep dispatch state in `.unlazy/<scope>/dispatch.json`; append events to the scope status log.
 
 ## Work each leaf in four passes
 
@@ -79,7 +79,7 @@ Offer the hook once when structural stop enforcement would materially help. Neve
 node <skill-dir>/scripts/install-hooks.mjs
 ```
 
-The hook returns Claude Code's top-level `decision: "block"` response while this session's resolved pipeline has unmet gates. Its own session-keyed progress guard releases after six consecutive blocks without ledger progress. Remove it with `--uninstall`.
+The hook returns Claude Code's top-level `decision: "block"` response while this session's resolved pipeline has unmet gates or incomplete dispatch waves. Its own session-keyed progress guard releases after six consecutive blocks without pipeline progress. Remove it with `--uninstall`.
 
 Default installation writes machine-specific project-local settings. Keep `.claude/settings.local.json`, `.unlazy/`, and `.unlazy-hook-state.json` in the project's ignore rules. Shared installation contains absolute Node and hook-script paths and is usually not portable across machines. Read [SECURITY.md](SECURITY.md) before choosing an install target.
 

@@ -29,6 +29,8 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Describe scopes and leases as coordination rather than filesystem or process isolation.
 - Add opt-in `--jobs <N>` rolling check concurrency while retaining sequential default behavior and deterministic ledger-order reporting.
 - Add declared readiness states, real `node-*` branch paths, explicit dependencies, and rolling leaf dispatch to the plan and orchestration guide.
+- Add atomic native dispatch waves that require every independent leaf to receive a distinct host start handle before the first return is accepted.
+- Add Codex and Claude Code launch adapters, incomplete-wave Stop-hook enforcement, and a measured worker-overlap regression without adding a model subprocess runner.
 - Key Stop-hook progress state to the session and scope, serialize state changes, and retain unlazy's own six-block no-progress release.
 
 ### Installer, package, and documentation
