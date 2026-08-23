@@ -49,6 +49,9 @@ const ABANDON_RE = /^ABANDON:\s*(\S*)\s*(.*)$/;
 const OWNS_RE = /^OWNS:\s*(.*)$/;
 const FENCE_OPEN_RE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 const REGEX_RE = /^\/([\s\S]*)\/([a-z]*)$/;
+// A pattern author escapes an inner slash or has none. A literal path always
+// carries one, so an unescaped inner slash marks the ambiguous reading.
+const UNESCAPED_SLASH_RE = /(^|[^\\])\//;
 const SCOPE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function parseRegex(expect) {
@@ -62,7 +65,12 @@ function parseRegex(expect) {
   } catch (error) {
     return { error: "invalid EXPECT regex: " + error.message };
   }
-  return { kind: "regex", source: match[1], flags: match[2] };
+  return {
+    kind: "regex",
+    source: match[1],
+    flags: match[2],
+    pathLike: UNESCAPED_SLASH_RE.test(match[1]),
+  };
 }
 
 // The checker and Stop hook both consume this exact result. Diagnostics are
@@ -202,6 +210,14 @@ export function parseGates(text, options = {}) {
     if (hasExpect) {
       const parsed = parseRegex(gate.expect);
       if (parsed.error) errors.push("gate " + gate.id + ": " + parsed.error);
+      else if (parsed.pathLike) {
+        // Warn rather than reject: the pattern reading may be intended, and a
+        // literal path cannot be expressed once the wrapping slashes sniff.
+        warnings.push("gate " + gate.id + ": EXPECT " + JSON.stringify(gate.expect) +
+          " is read as a regular expression, so its dots and other metacharacters" +
+          " are wildcards. Escape the inner slashes to keep the pattern, or drop" +
+          " the wrapping slashes to match a literal substring.");
+      }
       gate.expectation = parsed;
     } else gate.expectation = null;
   }

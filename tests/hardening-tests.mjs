@@ -444,6 +444,32 @@ test("leases: unsafe declarations, unknown leaves, and wildcard witnesses fail c
   } finally { s.cleanup(); }
 });
 
+test("parser: a slash wrapped literal path warns that it became a regex", async () => {
+  const s = sandbox();
+  try {
+    // "/etc/app/conf/" is a plausible literal expectation, and the slash sniff
+    // silently turns it into the pattern etc/app/conf, whose dots would be
+    // wildcards. There is no way to express that literal, so the author needs
+    // to be told which reading applies.
+    s.write("show.mjs", "console.log('resolved /etc/app/conf/');\n");
+    s.write("GATES.md", gate("G1", "config path is reported", "node show.mjs", "/etc/app/conf/"));
+    const warned = await gateRun(s, ["--status"], { approve: false });
+    has(warned.out, "G1");
+    has(warned.out, "read as a regular expression");
+    assert(warned.code === 1, "a warning must not become a parse error, got " + warned.code);
+
+    // A deliberate pattern carries no unescaped inner slash and stays quiet.
+    s.write("GATES.md", gate("G2", "typecheck is clean", "node show.mjs", "/Found 0 errors/"));
+    const quiet = await gateRun(s, ["--status"], { approve: false });
+    lacks(quiet.out, "read as a regular expression");
+
+    // Escaping keeps the pattern reading without the warning.
+    s.write("GATES.md", gate("G3", "path pattern", "node show.mjs", "/etc\\/app/"));
+    const escaped = await gateRun(s, ["--status"], { approve: false });
+    lacks(escaped.out, "read as a regular expression");
+  } finally { s.cleanup(); }
+});
+
 let passed = 0;
 const failures = [];
 for (const item of tests) {

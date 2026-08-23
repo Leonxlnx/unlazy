@@ -13,6 +13,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Add `--reverify` so parent verification executes already checked runnable gates and removes completion when the oracle no longer passes.
 - Require both process exit `0` and `EXPECT:` match. Include resolved shell, resolved working directory, exit status, and decisive output in evidence and diagnostics.
 - Discard an in-flight result when the gate's bound oracle changes before writeback.
+- Warn when a slash-wrapped `EXPECT:` containing an unescaped inner slash is read as a regular expression. A literal path silently became a pattern whose dots matched any character, and the wrapping slashes leave no way to express the literal.
 
 ### Command trust and portability
 
