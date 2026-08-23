@@ -52,6 +52,19 @@ A gate is unmet if any of these hold:
   ask whether the outcome is observable at all; if it is not, sharpen it.
 - **Make EXPECT decisive.** Match the line that can only appear on success
   (`8/8 passed`), not one that appears either way (`done`).
+- **Give a negative gate a positive control.** A gate proving absence is usually
+  written `cmd && echo FOUND || echo NOT_FOUND`, whose passing token comes from the
+  failure branch: a missing file, a wrong path or a malformed pattern all report
+  absence. Before trusting one, run its CHECK against a case you know contains the
+  thing and confirm it fails. A gate that has never failed has not been tested.
+- **Never make a supplied number the EXPECT.** When a brief hands you a figure to
+  cross check, gate on measuring the figure, not on matching it. `EXPECT: 7` makes
+  agreement with the brief the definition of success, so a contradicting measurement
+  of your own reads as your failure and invites you to bend it.
+- **Look at which gates ended up manual.** Checkability and risk are anti correlated:
+  the outcomes hardest to prove by command are usually the ones most likely to be
+  silently wrong. If one gate is manual, check whether it is also the riskiest outcome
+  in the leaf, and try harder to make that one runnable.
 - **Cap evidence.** gate-check records the deciding tail of output. When
   filling manual evidence by hand, quote the deciding lines or cite
   `file:line`, never paste a log.
