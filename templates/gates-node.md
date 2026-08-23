@@ -1,29 +1,50 @@
-# Gates: <branch name> (integration)
+# Gates: <branch name> integration
 
-Scope: children <list child leaves/branches> merged into one working whole
+Scope: integrate children <explicit child ids> into one verified result
 
-- [ ] N1: every child leaf's gates file is fully checked (no unchecked boxes, no pending evidence)
-  CHECK: node <skill-dir>/scripts/gate-check.mjs --status gates/leaf-<a>.md gates/leaf-<b>.md
+- [ ] N1: every named child leaf is reverified from its exact ledger
+  CHECK: node <skill-dir>/scripts/gate-check.mjs --root . --cwd . --reverify --jobs 1 .unlazy/<scope>/gates/leaf-<a>.md .unlazy/<scope>/gates/leaf-<b>.md
   EXPECT: ALL MET
   EVIDENCE: pending
 
-- [ ] N2: interfaces match the contract in PLAN.md
-  CHECK: <build / typecheck / import test command>
-  EXPECT: <success marker>
+- [ ] N2: child interfaces match the contract in PLAN.md
+  CHECK: node scripts/verify-interfaces.mjs
+  EXPECT: interface verification passed
   EVIDENCE: pending
 
 - [ ] N3: cross-child behavior works end to end
-  CHECK: <integration test, smoke script, or curl sequence>
-  EXPECT: <success marker>
+  CHECK: node scripts/verify-integration.mjs
+  EXPECT: integration verification passed
   EVIDENCE: pending
 
-- [ ] N4: nothing regressed in siblings this merge touched
-  CHECK: <targeted re-run of affected sibling checks>
-  EXPECT: <success marker>
+- [ ] N4: affected sibling behavior has not regressed
+  CHECK: node scripts/verify-regressions.mjs
+  EXPECT: regression verification passed
+  EVIDENCE: pending
+
+- [ ] N5: every direct child ownership lease was released after parent verification
+  EVIDENCE: pending
+
+- [ ] N6: consequential manual outcomes from the children were reviewed at branch level
   EVIDENCE: pending
 
 <!--
-Branch gates exist because finished parts do not imply a finished whole.
-Do not mark N1 by trusting child reports: re-run their checks yourself
-(verification hierarchy, references/orchestration.md).
+Replace every placeholder before running the checker.
+
+N1 must name every direct child explicitly and use --reverify, not --status.
+Status reports old evidence without executing it. Keep --jobs 1 unless the child
+checks are independent and deterministic parallel execution is intentional.
+If a child reports an abandonment, mark the branch ABANDONED and surface the
+handoff; do not treat the checker's remaining-gates `ALL MET` line as full completion.
+
+Branch paths use node-<id>.md. Leaf paths use leaf-<id>.md. Branch completion
+requires integration evidence; a set of locally complete leaves is not enough.
+
+For N5, run this once for each direct child after verification and record the
+outputs as manual evidence:
+
+node <skill-dir>/scripts/gate-check.mjs --scope <scope> --leaf leaf-<id> --release
+
+Drop N5 only when no child claimed ownership. See references/orchestration.md
+and references/parallel.md.
 -->

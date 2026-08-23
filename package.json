@@ -1,0 +1,13 @@
+{
+  "name": "unlazy-skill",
+  "version": "2.1.0",
+  "private": true,
+  "description": "Regression tests for the unlazy skill's zero-dependency enforcement tools",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/run-tests.mjs && node tests/hardening-tests.mjs && node tests/stress-tests.mjs && node tests/self-check.mjs"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

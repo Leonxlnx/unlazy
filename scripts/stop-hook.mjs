@@ -1,118 +1,132 @@
 #!/usr/bin/env node
-// stop-hook.mjs : Claude Code Stop hook for the unlazy skill (v2).
-//
-// Structurally blocks ending the turn while GATES.md / gates/*.md contain
-// unmet gates. Zero tokens: this is a file scan, not a model call.
-//
-// Behavior:
-//   - No gate files in cwd            -> allow (skill not active here)
-//   - All gates met or abandoned      -> allow
-//   - Unmet gates, progress happening -> block with a one-line reason
-//   - Unmet gates, NO progress after MAX_BLOCKS consecutive blocks -> allow
-//     with a warning (never traps a genuinely stuck agent; Claude Code
-//     additionally force-releases after 8 consecutive blocks)
-//
-// Progress = the combined content of the gate files changed since last block.
-// State lives in .unlazy-hook-state.json next to the gates (add to .gitignore).
-//
-// Argv is ignored. The installer appends "--unlazy" so its own entries stay
-// identifiable in settings without depending on the install path.
-//
-// Contract (docs: code.claude.com/docs/en/hooks):
-//   stdin  JSON with { cwd, stop_hook_active, ... }
-//   stdout {"decision":"block","reason":"..."} + exit 0 to block; exit 0 silent to allow.
+// Claude Code Stop hook for one unlazy pipeline. Zero dependencies. Node 16+.
 
-import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  UNLAZY_DIR, gateState, hookStatePath, parseGates, qualify, resolveTarget,
+  sha256, validateScopeId, withFileLock, writeAtomic,
+} from "./lib/gates.mjs";
 
 const MAX_BLOCKS = 6;
+const args = process.argv.slice(2);
+const scopeIndex = args.indexOf("--scope");
+const scopeArg = scopeIndex === -1 ? null : args[scopeIndex + 1];
 
-function readStdin() {
-  try { return readFileSync(0, "utf8"); } catch { return "{}"; }
+const allow = (message) => {
+  if (message) console.log(JSON.stringify({ systemMessage: message }));
+  process.exit(0);
+};
+
+if (scopeIndex !== -1 && (!scopeArg || validateScopeId(scopeArg))) {
+  allow("unlazy: installed hook has an invalid --scope value; not blocking.");
 }
 
 let payload = {};
-try { payload = JSON.parse(readStdin() || "{}"); } catch { /* stay permissive */ }
-const cwd = payload.cwd || process.cwd();
+try { payload = JSON.parse(readFileSync(0, "utf8") || "{}"); }
+catch { allow(null); }
 
-function gateFiles(dir) {
-  const found = [];
-  const top = join(dir, "GATES.md");
-  if (existsSync(top)) found.push(top);
-  const gdir = join(dir, "gates");
-  if (existsSync(gdir)) {
-    try {
-      for (const f of readdirSync(gdir)) if (f.endsWith(".md")) found.push(join(gdir, f));
-    } catch { /* ignore */ }
+const root = resolve(typeof payload.cwd === "string" && payload.cwd ? payload.cwd : process.cwd());
+const sessionId = payload.session_id || payload.sessionId || "anonymous";
+const sessionKey = sha256(String(sessionId)).slice(0, 24);
+const target = resolveTarget({ root, scope: scopeArg, sessionId });
+
+if (target.ambiguous) {
+  allow("unlazy: " + target.ambiguous.length + " pipelines under " + UNLAZY_DIR +
+    "/ (" + target.ambiguous.join(", ") + ") and none bound to this session; not blocking.");
+}
+if (target.error && !target.ambiguous) allow("unlazy: " + target.error + "; not blocking.");
+
+const statePath = hookStatePath(root, target.scope);
+
+async function clearSessionState() {
+  if (!existsSync(statePath)) return;
+  try {
+    await withFileLock(root, statePath, () => {
+      let state = { schema: 1, sessions: {} };
+      try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch { /* replace invalid local state */ }
+      if (!state || typeof state !== "object" || Array.isArray(state) || !state.sessions || typeof state.sessions !== "object") {
+        state = { schema: 1, sessions: {} };
+      }
+      delete state.sessions[sessionKey];
+      if (!Object.keys(state.sessions).length) {
+        try { unlinkSync(statePath); } catch { /* already absent */ }
+      } else writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n", { root });
+    });
+  } catch {
+    // State cleanup must never trap a session after the gates are complete.
   }
-  return found;
 }
 
-const files = gateFiles(cwd);
-if (!files.length) process.exit(0); // no gates, nothing to enforce
+if (!target.files.length) {
+  await clearSessionState();
+  allow(null);
+}
 
-const GATE_RE = /^- \[( |x|X)\] (.*)$/;
-const EVIDENCE_RE = /^\s+EVIDENCE:\s?(.*)$/;
-const ABANDON_RE = /^ABANDON:\s*(\S+)/;
-
-let combined = "";
 const unmet = [];
-
-for (const file of files) {
-  let text = "";
-  try { text = readFileSync(file, "utf8"); } catch { continue; }
-  combined += text;
-  const lines = text.split(/\r?\n/);
-  const abandoned = new Set(
-    lines.map(l => (l.match(ABANDON_RE) || [])[1]).filter(Boolean).map(s => s.replace(/:$/, ""))
-  );
-  let cur = null; // { id, checked, evidence }
-  const flush = () => {
-    if (!cur || abandoned.has(cur.id)) { cur = null; return; }
-    const pending = cur.evidence === null || /^pending$/i.test(cur.evidence);
-    if (!cur.checked || pending) unmet.push(cur.id);
-    cur = null;
-  };
-  for (const line of lines) {
-    const g = line.match(GATE_RE);
-    if (g) {
-      flush();
-      cur = {
-        checked: g[1].toLowerCase() === "x",
-        id: (g[2].match(/^(\S+?):/) || [null, g[2].trim().slice(0, 24)])[1],
-        evidence: null,
-      };
-      continue;
-    }
-    const ev = cur && line.match(EVIDENCE_RE);
-    if (ev) cur.evidence = ev[1].trim();
+const invalid = [];
+let combined = "";
+for (const file of [...target.files].sort()) {
+  let text;
+  try { text = readFileSync(file, "utf8"); }
+  catch (error) {
+    invalid.push(qualify(file, "PARSE") + " unreadable: " + error.message);
+    continue;
   }
-  flush();
+  combined += file + "\0" + text + "\0";
+  const doc = parseGates(text);
+  if (doc.errors.length) {
+    invalid.push(qualify(file, "PARSE") + " " + doc.errors.slice(0, 2).join("; "));
+    continue;
+  }
+  for (const gate of doc.gates) {
+    const state = gateState(gate, doc.abandoned);
+    if (state === "unmet" || state === "unmet-no-evidence") unmet.push(qualify(file, gate.id));
+  }
 }
 
-if (!unmet.length) process.exit(0); // everything met or honestly abandoned
-
-// Progress-aware loop guard.
-const statePath = join(cwd, ".unlazy-hook-state.json");
-const hash = createHash("sha256").update(combined).digest("hex").slice(0, 16);
-let state = { hash: "", blocks: 0 };
-try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch { /* fresh */ }
-if (state.hash !== hash) state = { hash, blocks: 0 }; // progress -> reset counter
-state.blocks += 1;
-try { writeFileSync(statePath, JSON.stringify(state)); } catch { /* non-fatal */ }
-
-if (state.blocks > MAX_BLOCKS) {
-  // No progress across MAX_BLOCKS consecutive stops: release rather than trap.
-  console.log(JSON.stringify({
-    systemMessage: `unlazy: releasing after ${MAX_BLOCKS} blocks without gate progress; ${unmet.length} gates remain unmet (${unmet.slice(0, 4).join(", ")}).`,
-  }));
-  process.exit(0);
+if (!unmet.length && !invalid.length) {
+  await clearSessionState();
+  allow(null);
 }
 
-const list = unmet.slice(0, 5).join(", ") + (unmet.length > 5 ? `, +${unmet.length - 5} more` : "");
+const contentHash = sha256(combined + invalid.join("\0")).slice(0, 24);
+let sessionState;
+try {
+  sessionState = await withFileLock(root, statePath, () => {
+    let state = { schema: 1, sessions: {} };
+    try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch { /* new or corrupt local state */ }
+    if (!state || typeof state !== "object" || Array.isArray(state) || !state.sessions ||
+        typeof state.sessions !== "object" || Array.isArray(state.sessions)) {
+      state = { schema: 1, sessions: {} };
+    }
+    let current = state.sessions[sessionKey];
+    if (!current || current.hash !== contentHash) current = { hash: contentHash, blocks: 0 };
+    current.blocks += 1;
+    current.updatedAt = new Date().toISOString();
+    state.sessions[sessionKey] = current;
+    // Bound abandoned session debris without mixing counters between sessions.
+    const entries = Object.entries(state.sessions).sort((a, b) => String(b[1].updatedAt).localeCompare(String(a[1].updatedAt)));
+    state.sessions = Object.fromEntries(entries.slice(0, 64));
+    writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n", { root });
+    return current;
+  });
+} catch (error) {
+  allow("unlazy: could not update the serialized hook state (" + error.message + "); not blocking to avoid a trap.");
+}
+
+const where = target.scope ? " [scope " + target.scope + "]" : "";
+const outstanding = [...invalid, ...unmet];
+if (sessionState.blocks > MAX_BLOCKS) {
+  allow("unlazy: releasing after " + MAX_BLOCKS + " blocks without gate progress" + where +
+    "; " + outstanding.length + " item(s) remain (" + outstanding.slice(0, 4).join(", ") + ").");
+}
+
+const list = outstanding.slice(0, 5).join(", ") + (outstanding.length > 5 ? ", +" + (outstanding.length - 5) + " more" : "");
 console.log(JSON.stringify({
   decision: "block",
-  reason: `unlazy: ${unmet.length} gate(s) unmet: ${list}. Work the next unchecked gate (run gate-check.mjs to execute CHECK lines), or add "ABANDON: <id> <reason>" if one is genuinely impossible. Done means every box checked with evidence.`,
+  reason: "unlazy" + where + ": " + outstanding.length + " gate/ledger item(s) need work: " + list +
+    ". Run gate-check.mjs --status to inspect without execution. To run inherited CHECK lines, inspect them and use --approve. " +
+    "Use ABANDON: <id> <non-blank reason> only when a gate is genuinely impossible.",
 }));
 process.exit(0);

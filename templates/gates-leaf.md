@@ -1,27 +1,50 @@
 # Gates: <leaf or task name>
 
-Scope: <one line: what this unit of work delivers>
+OWNS: <repository-relative globs this leaf may write, for example src/api/**, tests/api/**>
 
-- [ ] G1: <observable outcome, stated so a stranger could judge it>
-  CHECK: <shell command that proves it>
-  EXPECT: <substring the command output must contain, or /regex/>
+Scope: <one sentence describing the complete deliverable>
+
+- [ ] G1: <observable outcome measured directly from the artifact>
+  CHECK: node scripts/verify-outcome.mjs
+  EXPECT: outcome verification passed
   EVIDENCE: pending
 
-- [ ] G2: <another runnable outcome>
-  CHECK: <command>
-  EXPECT: <substring or /regex/>
+- [ ] G2: <integration outcome in a subproject>
+  CHECK: node scripts/verify-integration.mjs
+  EXPECT: integration verification passed
+  CWD: packages/example
   EVIDENCE: pending
 
-- [ ] G3: <manual gate, when no command can prove it>
+- [ ] G3: <manual outcome that no command can decide>
   EVIDENCE: pending
 
 <!--
-Rules (full spec in references/gates.md):
-- One box per outcome. Boxes are flipped by gate-check.mjs when CHECK output
-  matches EXPECT, or by hand for manual gates.
-- A checked box with EVIDENCE still reading "pending" counts as UNMET.
-- Evidence is the deciding lines only, never a full log.
-- If a gate becomes impossible, do not delete it. Add a line:
-    ABANDON: G<n> <reason>
-  and report it. Visible surrender is honest; silent scope-narrowing is not.
+Replace every placeholder before running the checker.
+
+Strict format:
+- Use a unique explicit id for every gate.
+- Indent CHECK, EXPECT, CWD, and EVIDENCE.
+- Give a runnable gate both CHECK and EXPECT; give a manual gate neither.
+- Success requires process exit 0 and EXPECT.
+- Make EXPECT a success-only marker produced after every assertion passes.
+- For an absence or negative assertion, test the same checker against a known
+  positive fixture and record that control in the gate's manual review.
+- Measure supplied figures from source. Do not copy a supplied number into
+  EXPECT as its own proof.
+- Use repository-owned Node scripts for portable examples. Declare any
+  non-default shell or external tool requirement explicitly.
+- Scoped and legacy discovery anchor checks at the repository root. When this
+  ledger is named explicitly from `.unlazy/`, pass an explicit repository
+  `--root` and `--cwd` so repository-relative commands keep the same base.
+- Record exact manual evidence and review consequential manual gates by risk.
+- OWNS paths must be repository-relative, complete, and disjoint from every
+  concurrently dispatched leaf. Claims coordinate writers; they do not sandbox.
+
+If a gate becomes genuinely impossible, keep the gate and add:
+
+```text
+ABANDON: G<n> <non-empty reason and handoff>
+```
+
+Surface every abandonment in the final report. See references/gates.md.
 -->

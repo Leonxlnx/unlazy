@@ -1,97 +1,164 @@
 #!/usr/bin/env node
-// install-hooks.mjs : register (or remove) the unlazy Stop hook in Claude Code settings.
-//
-// Default target: <cwd>/.claude/settings.local.json  (personal, per-project,
-// conventionally untracked, so the machine-specific absolute path never lands in git).
-//
-//   node install-hooks.mjs               install into project settings.local.json
-//   node install-hooks.mjs --shared      install into project settings.json (tracked)
-//   node install-hooks.mjs --global      install into ~/.claude/settings.json
-//   node install-hooks.mjs --uninstall   remove from the chosen target (same flags)
-//
-// Idempotent: running install twice changes nothing.
+// Install or remove unlazy's Claude Code Stop hook. Zero dependencies. Node 16+.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { validateScopeId, writeAtomic } from "./lib/gates.mjs";
+
+const HELP = `usage: install-hooks.mjs [--scope ID] [--shared | --global] [--uninstall]
+
+  default       .claude/settings.local.json in the current project
+  --shared      .claude/settings.json in the current project
+  --global      ~/.claude/settings.json
+  --scope ID    pin the hook to one validated .unlazy/ID pipeline
+  --uninstall   remove only unlazy handlers, preserving sibling handlers`;
+
+function usage(message) {
+  console.error("install-hooks: " + message);
+  console.error("run install-hooks.mjs --help for usage");
+  process.exit(2);
+}
 
 const args = process.argv.slice(2);
-const uninstall = args.includes("--uninstall");
-const global_ = args.includes("--global");
-const shared = args.includes("--shared");
+const known = new Set(["--scope", "--shared", "--global", "--uninstall", "--help", "-h"]);
+let scope = null;
+let shared = false;
+let global = false;
+let uninstall = false;
+for (let index = 0; index < args.length; index++) {
+  const arg = args[index];
+  if (!known.has(arg)) usage("unknown option " + arg);
+  if (arg === "--help" || arg === "-h") { console.log(HELP); process.exit(0); }
+  if (arg === "--scope") {
+    if (scope !== null) usage("duplicate --scope");
+    scope = args[++index];
+    if (!scope) usage("--scope needs a pipeline id");
+    continue;
+  }
+  if (arg === "--shared") shared = true;
+  if (arg === "--global") global = true;
+  if (arg === "--uninstall") uninstall = true;
+}
+if (shared && global) usage("--shared and --global are mutually exclusive");
+if (scope) {
+  const error = validateScopeId(scope);
+  if (error) usage(error);
+}
 
-const hookScript = join(dirname(fileURLToPath(import.meta.url)), "stop-hook.mjs");
-const MARKER = "unlazy"; // passed to the hook as an ignored argv tag, so identification
-                         // never depends on the skill living in a path named "unlazy"
-                         // (an argument, not a shell comment: cmd.exe has no "#")
-
-const target = global_
+const script = fileURLToPath(new URL("./stop-hook.mjs", import.meta.url));
+const target = global
   ? join(homedir(), ".claude", "settings.json")
   : join(process.cwd(), ".claude", shared ? "settings.json" : "settings.local.json");
+const backup = target + ".unlazy.bak";
 
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+let raw = "";
 let settings = {};
 if (existsSync(target)) {
-  try { settings = JSON.parse(readFileSync(target, "utf8")); }
-  catch (e) {
-    console.error(`Refusing to touch ${target}: it exists but is not valid JSON (${e.message}).`);
+  try {
+    const info = lstatSync(target);
+    if (info.isSymbolicLink() || !info.isFile()) throw new Error("target must be a regular file, not a link or directory");
+    raw = readFileSync(target, "utf8");
+    settings = JSON.parse(raw);
+  } catch (error) {
+    console.error("Refusing to touch " + target + ": " + error.message);
     process.exit(1);
   }
 }
 
-settings.hooks = settings.hooks || {};
-const stopHooks = Array.isArray(settings.hooks.Stop) ? settings.hooks.Stop : [];
-
-const isOurs = (entry) =>
-  Array.isArray(entry?.hooks) &&
-  entry.hooks.some(h => typeof h?.command === "string" &&
-    h.command.includes("stop-hook.mjs") &&
-    // marker in the command, or, for entries written before it existed, our own path
-    (h.command.toLowerCase().includes(MARKER) || h.command.includes(hookScript)));
-
-// Ours AND still pointing at this copy of the script. An entry left behind by
-// an install that has since moved is ours, but stale: it must be replaced, not
-// reported as already installed, or enforcement is silently off.
-const isCurrent = (entry) =>
-  Array.isArray(entry?.hooks) &&
-  entry.hooks.some(h => typeof h?.command === "string" && h.command.includes(hookScript));
-
-const kept = stopHooks.filter(e => !isOurs(e));
-
-if (uninstall) {
-  if (kept.length === stopHooks.length) {
-    console.log(`Nothing to remove: no unlazy Stop hook found in ${target}`);
-    process.exit(0);
+function validateSettings(value) {
+  if (!isObject(value)) return "settings root must be a JSON object";
+  if (value.hooks !== undefined && !isObject(value.hooks)) return "hooks must be a JSON object";
+  if (value.hooks && value.hooks.Stop !== undefined && !Array.isArray(value.hooks.Stop)) return "hooks.Stop must be an array";
+  const groups = (value.hooks && value.hooks.Stop) || [];
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+    const group = groups[groupIndex];
+    if (!isObject(group)) return "hooks.Stop[" + groupIndex + "] must be an object";
+    if (!Array.isArray(group.hooks)) return "hooks.Stop[" + groupIndex + "].hooks must be an array";
+    for (let hookIndex = 0; hookIndex < group.hooks.length; hookIndex++) {
+      if (!isObject(group.hooks[hookIndex])) {
+        return "hooks.Stop[" + groupIndex + "].hooks[" + hookIndex + "] must be an object";
+      }
+    }
   }
-  settings.hooks.Stop = kept;
-  if (!settings.hooks.Stop.length) delete settings.hooks.Stop;
-  if (!Object.keys(settings.hooks).length) delete settings.hooks;
-  writeFileSync(target, JSON.stringify(settings, null, 2) + "\n");
-  console.log(`Removed unlazy Stop hook from ${target}`);
-  process.exit(0);
+  return null;
 }
 
-const entry = {
-  hooks: [{
-    type: "command",
-    command: `node "${hookScript}" --${MARKER}`,
-    timeout: 20,
-  }],
+const shapeError = validateSettings(settings);
+if (shapeError) {
+  console.error("Refusing to touch " + target + ": " + shapeError + ".");
+  process.exit(1);
+}
+
+const quote = (value) => {
+  if (process.platform === "win32") return '"' + String(value).replace(/"/g, '""') + '"';
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+};
+const command = quote(process.execPath) + " " + quote(script) + " --unlazy" + (scope ? " --scope " + scope : "");
+
+const isOurHandler = (handler) => {
+  if (!isObject(handler) || typeof handler.command !== "string") return false;
+  const value = handler.command;
+  return value.includes("stop-hook.mjs") && (value.includes("--unlazy") || value.includes(script) || /[\\/]unlazy[\\/]/i.test(value));
 };
 
-if (stopHooks.some(isCurrent)) {
-  console.log(`Already installed in ${target} (idempotent, nothing changed).`);
+const originalGroups = (settings.hooks && settings.hooks.Stop) || [];
+let removed = 0;
+const keptGroups = [];
+for (const group of originalGroups) {
+  const hooks = group.hooks.filter((handler) => {
+    if (!isOurHandler(handler)) return true;
+    removed++;
+    return false;
+  });
+  if (hooks.length) keptGroups.push({ ...group, hooks });
+}
+
+function nextSettings(groups) {
+  const result = { ...settings };
+  const hooks = { ...(settings.hooks || {}) };
+  if (groups.length) hooks.Stop = groups;
+  else delete hooks.Stop;
+  if (Object.keys(hooks).length) result.hooks = hooks;
+  else delete result.hooks;
+  return result;
+}
+
+function persist(value) {
+  try {
+    if (raw) writeAtomic(backup, raw);
+    writeAtomic(target, JSON.stringify(value, null, 2) + "\n");
+  } catch (error) {
+    console.error("Could not update " + target + ": " + error.message);
+    process.exit(1);
+  }
+}
+
+if (uninstall) {
+  if (!removed) {
+    console.log("Nothing to remove: no unlazy Stop hook found in " + target);
+    process.exit(0);
+  }
+  persist(nextSettings(keptGroups));
+  console.log("Removed unlazy Stop hook (" + removed + " handler(s)) from " + target + ". Sibling handlers were preserved.");
   process.exit(0);
 }
 
-settings.hooks.Stop = [...kept, entry];
-mkdirSync(dirname(target), { recursive: true });
-writeFileSync(target, JSON.stringify(settings, null, 2) + "\n");
+const alreadyCurrent = removed === 1 && originalGroups.some((group) =>
+  group.hooks.some((handler) => isOurHandler(handler) && handler.command === command &&
+    handler.type === "command" && handler.timeout === 20));
+if (alreadyCurrent) {
+  console.log("Already installed in " + target + " (idempotent, nothing changed).");
+  process.exit(0);
+}
 
-console.log(`Installed unlazy Stop hook into ${target}
-  command: node "${hookScript}" --${MARKER}
-  effect:  while GATES.md or gates/*.md in the working directory contain unmet
-           gates, ending the turn is blocked (max 6 blocks without progress,
-           ABANDON lines are honored as an honest exit).
-  remove:  node "${fileURLToPath(import.meta.url)}"${global_ ? " --global" : shared ? " --shared" : ""} --uninstall
-  note:    add .unlazy-hook-state.json to your .gitignore`);
+const entry = { hooks: [{ type: "command", command, timeout: 20 }] };
+persist(nextSettings([...keptGroups, entry]));
+console.log("Installed unlazy Stop hook into " + target + "\n" +
+  "  command: " + command + "\n" +
+  "  scope:   " + (scope ? scope : "resolved per session/pipeline") + "\n" +
+  "  backup:  " + (raw ? backup : "not needed for a new file") + "\n" +
+  "  note:    keep .unlazy/ and .unlazy-hook-state.json ignored; they are local coordination state." +
+  (shared ? "\n  warning: shared settings contain this machine's absolute Node and skill paths." : ""));

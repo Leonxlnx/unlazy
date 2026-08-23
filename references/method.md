@@ -1,64 +1,46 @@
-# The Depth Tree, v2
+# The Depth Tree
 
-Created by Leonxlnx. v1 stated the tree as arithmetic: split N layers, give
-every leaf the full root budget, effort multiplies as 2^(N-1). A controlled
-six-run test (see the README) measured what models actually do with that
-instruction: they treat depth as a thoroughness dial and ignore the
-arithmetic. tree 6 cost roughly 1.0 to 1.5 times tree 3, never 8 times.
-The dial worked; the math was fiction.
+Use the tree to expose natural work boundaries and integration points. Do not treat depth as an arithmetic promise about effort or tokens.
 
-v2 keeps what the tree is genuinely good at, decomposition and structure,
-and moves the effort guarantee to where it can actually be enforced: per-leaf
-gates and fresh per-leaf contexts.
+The original v1 method claimed that each binary split multiplied effort. A small maintainer-run comparison later suggested that agents treated depth as a thoroughness cue rather than following that arithmetic. The repository does not contain the raw artifacts needed to reproduce those historical figures, so treat them as design history, not benchmark evidence. See [../research/validation-protocol.md](../research/validation-protocol.md).
 
-## The rules
+## Rules
 
-1. **Layer 1 is the task.** Split at natural joints, binary where natural
-   joints allow, N layers deep. Leaves are the only places real work happens;
-   every layer above them is decomposition and integration.
+1. **Make layer 1 the requested task.** Split only at real domain, component, or verification boundaries. Binary splits are optional.
+2. **Make each leaf one coherent deliverable.** Give it exact ownership, dependencies, and acceptance gates. Merge tiny adjacent leaves; split a leaf that hides several independent outcomes.
+3. **Fix contracts before fan-out.** Record interfaces, formats, shared assumptions, error conventions, naming, and ownership in `PLAN.md` before a leaf starts.
+4. **Give branches integration gates.** Verify child ledgers again, then test interfaces, end-to-end behavior, and regressions across the joined work.
+5. **Use gates and passes as the effort control.** Finish implementation, expert reread, defect hunt, and low-cost polish. Stop only when every required gate has current evidence and another improvement pass finds nothing.
 
-2. **A leaf is a real unit of work.** Ten or more minutes of focused effort,
-   one coherent deliverable, one gates file. If splitting produces leaves
-   smaller than that, you went one layer too deep; back off a layer. Depth
-   follows the task's joints. It is not a number you crank for effort.
+## Choose depth
 
-3. **Contracts before fan-out.** Interfaces, data ownership, naming, error
-   conventions go into PLAN.md before any leaf starts. In orchestrated mode
-   no two leaves may own the same file; if they seem to need to, the split
-   is wrong or the shared thing belongs in the contract.
+- Use a shallow tree or solo ledger for a feature, contained bug hunt, or document.
+- Use an orchestrated tree when several coherent deliverables benefit from fresh contexts or independent ownership.
+- Use a deeper tree only when its additional branches correspond to real integration boundaries. Do not add empty hierarchy to satisfy a number.
+- Honor an explicit `tree N` request while keeping leaves meaningful. If the requested depth would create filler leaves, state the mismatch and use the closest honest decomposition.
 
-4. **Leaves get gates; branches get gates.** A leaf's gates prove its
-   deliverable. A branch's gates prove integration: children merged,
-   interfaces match, end-to-end behavior works, no sibling regressions.
-   The most expensive failure of deep trees is thirty-two locally perfect
-   leaves that do not compose; branch gates exist to catch exactly that.
+When no depth is requested, choose the smallest tree that exposes every independent deliverable and integration point.
 
-5. **Effort per leaf comes from the leaf's gates plus the four passes**
-   (implement fully, expert re-read, defect hunt, free polish). A leaf is
-   finished when its gates are fully met with evidence AND a full pass finds
-   nothing to improve. "Budget spent" is no longer a finish line, because
-   budgets were the part models routinely re-negotiated with themselves.
+## Contract checklist
 
-## Where the effort guarantee actually lives now
+Before dispatch, make these decisions explicit:
 
-| v1 said | v2 does |
+- exact files or relative globs each leaf owns
+- interfaces and schemas shared between leaves
+- dependency ids and readiness states
+- toolchain, shell, and working-directory requirements
+- error and compatibility conventions
+- which branch gates prove integration
+- who performs high-risk manual review
+
+Do not let two concurrent leaves own the same path. If shared work cannot be separated, make it an earlier dependency or a dedicated integration leaf.
+
+## Completion hierarchy
+
+| Layer | Proof |
 |---|---|
-| every leaf gets full budget T | every leaf gets a fresh context and its own gates |
-| effort = 2^(N-1) x T | effort = whatever it takes to check every box with evidence |
-| no report until done (prose) | stop-hook and ledger make early reports structurally visible |
-| verify, do not trust yourself | CHECK commands run in the shell; parent re-runs them |
+| Leaf | Current runnable evidence plus reviewed manual evidence |
+| Branch | Reverified children plus cross-child integration checks |
+| Root | Every branch integrated, regressions checked, final claims remeasured |
 
-## Choosing N
-
-- **tree 2 or 3**: a feature, a bug hunt, a document. Solo mode, one gates
-  file, 2 to 4 leaves worked in sequence in one session.
-- **tree 4 or 5**: a subsystem, a refactor, a serious review. Consider
-  orchestrated mode; 8 to 16 leaves is past what one context holds well.
-- **tree 6 or 7**: an entire project built to a high bar. Orchestrated mode,
-  leaves mapped onto disjoint work units, parallelized where the harness
-  allows, branch gates at every merge point.
-
-When the user gives no depth, pick the smallest N whose leaves match the
-task's natural parts. Do not go one deeper by default; go one deeper only
-when a leaf fails the "real unit of work" test in the other direction, that
-is, when a leaf would clearly hide multiple deliverables inside it.
+Local completion does not imply integration. Verify from leaves upward and report only after the root ledger is satisfied.
