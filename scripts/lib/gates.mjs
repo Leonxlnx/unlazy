@@ -46,6 +46,7 @@ const GATE_RE = /^- \[( |x|X)\] (.*)$/;
 const ATTR_RE = /^(\s+)(CHECK|EXPECT|EVIDENCE|CWD):\s?(.*)$/;
 const UNINDENTED_ATTR_RE = /^(CHECK|EXPECT|EVIDENCE|CWD):\s?(.*)$/;
 const ABANDON_RE = /^ABANDON:\s*(\S*)\s*(.*)$/;
+const INDENTED_ABANDON_RE = /^\s+ABANDON:/;
 const OWNS_RE = /^OWNS:\s*(.*)$/;
 const FENCE_OPEN_RE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 const REGEX_RE = /^\/([\s\S]*)\/([a-z]*)$/;
@@ -125,6 +126,16 @@ export function parseGates(text, options = {}) {
         errors.push("line " + (index + 1) + ": duplicate gate id " + id +
           " (first declared on line " + ids.get(id) + ")");
       } else ids.set(id, index + 1);
+      continue;
+    }
+
+    // Attributes must be indented and ABANDON must not be, so the two rules
+    // point opposite ways. Diagnose the indented abandonment rather than
+    // ignoring it, or the author's honest exit fails with no explanation.
+    if (INDENTED_ABANDON_RE.test(line)) {
+      errors.push("line " + (index + 1) +
+        ": indented ABANDON is not applied; start ABANDON at column 1");
+      current = null;
       continue;
     }
 

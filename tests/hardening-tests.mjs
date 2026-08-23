@@ -444,6 +444,30 @@ test("leases: unsafe declarations, unknown leaves, and wildcard witnesses fail c
   } finally { s.cleanup(); }
 });
 
+test("parser: an indented ABANDON is diagnosed instead of silently ignored", async () => {
+  const s = sandbox();
+  try {
+    // Every other attribute must be indented, so indenting the abandonment is
+    // the natural mistake. Ignoring the line silently leaves the gate unmet
+    // with no diagnostic, so the honest exit fails for a formatting reason the
+    // author is never told about.
+    s.write("GATES.md", [
+      "# Gates: indented abandonment",
+      "",
+      "Scope: an abandonment indented like every other attribute",
+      "",
+      "- [ ] G1: upstream export reconciles",
+      "  EVIDENCE: pending",
+      "  ABANDON: G1 upstream export was withdrawn",
+      "",
+    ].join("\n"));
+    const result = await gateRun(s, ["--status"], { approve: false });
+    assert(result.code === 2, "expected a parse error, got " + result.code + "\n" + result.out);
+    has(result.out, "indented ABANDON");
+    has(result.out, "column 1");
+  } finally { s.cleanup(); }
+});
+
 let passed = 0;
 const failures = [];
 for (const item of tests) {
