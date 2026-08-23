@@ -2,7 +2,7 @@
 // Security, parser, execution, and writeback regressions. Zero dependencies.
 
 import {
-  appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
+  appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
   writeFileSync,
 } from "node:fs";
 import { execFile } from "node:child_process";
@@ -398,8 +398,8 @@ test("targeting: explicit files anchor relative commands and every positional fi
     const result = await gateRun(s, ["--timeout", "5", "a/leaf.md", "b/leaf.md"]);
     assert(result.code === 0, result.out);
     has(result.out, "PASS leaf:G1");
-    has(s.read("a/leaf.md"), "cwd=" + join(s.dir, "a"));
-    has(s.read("b/leaf.md"), "cwd=" + join(s.dir, "b"));
+    has(s.read("a/leaf.md"), "cwd=" + realpathSync(join(s.dir, "a")));
+    has(s.read("b/leaf.md"), "cwd=" + realpathSync(join(s.dir, "b")));
   } finally { s.cleanup(); }
 });
 

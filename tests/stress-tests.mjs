@@ -116,8 +116,12 @@ test("hook: repeated 64-writer bursts are serialized without lost increments", a
       const results = await Promise.all(Array.from({ length: 64 }, () =>
         run(STOP_HOOK, [], { cwd: s.dir, stdin: payload })));
       assert(results.every((result) => result.code === 0), "round " + round + ": a hook process failed");
-      assert(results.every((result) => !result.out.includes("could not update the serialized hook state")),
-        "round " + round + ": a hook failed open on its state update");
+      const failedUpdates = results
+        .filter((result) => result.out.includes("could not update the serialized hook state"))
+        .map((result) => result.out.trim());
+      assert(failedUpdates.length === 0,
+        "round " + round + ": " + failedUpdates.length + " hook(s) failed open on the state update\n" +
+        [...new Set(failedUpdates)].slice(0, 4).join("\n---\n"));
       const state = JSON.parse(s.read(".unlazy-hook-state.json"));
       const sessions = Object.values(state.sessions);
       assert(sessions.length === 1, "round " + round + ": expected one session, got " + sessions.length);

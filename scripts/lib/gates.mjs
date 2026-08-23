@@ -15,6 +15,33 @@ export const LOCK_DIR = join(UNLAZY_DIR, "locks");
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 export const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
 
+const WINDOWS_TRANSIENT_FS_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+const SYNC_SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
+
+function isTransientWindowsFsError(error) {
+  return process.platform === "win32" && WINDOWS_TRANSIENT_FS_ERRORS.has(error && error.code);
+}
+
+// Windows scanners and indexers can briefly retain a handle to a file after it
+// closes. Keep the same private temp file and retry replacement while the caller
+// still holds its lock; never unlink the destination or fall back to an in-place
+// write, either of which would sacrifice atomicity.
+function replaceAtomic(temp, target) {
+  const deadline = Date.now() + 2000;
+  let delay = 5;
+  for (;;) {
+    try {
+      renameSync(temp, target);
+      return;
+    } catch (error) {
+      const remaining = deadline - Date.now();
+      if (!isTransientWindowsFsError(error) || remaining <= 0) throw error;
+      Atomics.wait(SYNC_SLEEP_CELL, 0, 0, Math.min(delay, remaining));
+      delay = Math.min(delay * 2, 100);
+    }
+  }
+}
+
 const GATE_RE = /^- \[( |x|X)\] (.*)$/;
 const ATTR_RE = /^(\s+)(CHECK|EXPECT|EVIDENCE|CWD):\s?(.*)$/;
 const UNINDENTED_ATTR_RE = /^(CHECK|EXPECT|EVIDENCE|CWD):\s?(.*)$/;
@@ -402,7 +429,7 @@ export function writeAtomic(file, text, options = {}) {
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
-    renameSync(temp, target);
+    replaceAtomic(temp, target);
   } finally {
     if (fd !== null) try { closeSync(fd); } catch { /* ignore */ }
     if (temp) try { unlinkSync(temp); } catch { /* renamed or absent */ }
@@ -450,10 +477,21 @@ export async function withFileLock(root, target, fn, options = {}) {
   finally {
     try { closeSync(fd); } catch { /* ignore */ }
     if (identified) {
-      try {
-        const current = JSON.parse(readFileSync(lock, "utf8"));
-        if (current.token === token) unlinkSync(lock);
-      } catch { /* manual cleanup or a successor already owns the path */ }
+      const deadline = Date.now() + 2000;
+      let delay = 5;
+      for (;;) {
+        try {
+          const current = JSON.parse(readFileSync(lock, "utf8"));
+          if (current.token === token) unlinkSync(lock);
+          break;
+        } catch (error) {
+          if (error && error.code === "ENOENT") break;
+          const remaining = deadline - Date.now();
+          if (!isTransientWindowsFsError(error) || remaining <= 0) break;
+          await sleep(Math.min(delay, remaining));
+          delay = Math.min(delay * 2, 100);
+        }
+      }
     }
   }
 }
