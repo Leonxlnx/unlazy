@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = [
   "scripts/gate-check.mjs",
+  "scripts/gate-lint.mjs",
   "scripts/stop-hook.mjs",
   "scripts/install-hooks.mjs",
   "scripts/lib/gates.mjs",
@@ -24,6 +25,7 @@ const SCRIPTS = [
   "tests/run-tests.mjs",
   "tests/hardening-tests.mjs",
   "tests/stress-tests.mjs",
+  "tests/lint-tests.mjs",
   "tests/self-check.mjs",
 ];
 

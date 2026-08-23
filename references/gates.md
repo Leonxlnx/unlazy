@@ -99,6 +99,28 @@ The checker validates a declared oracle. It cannot infer whether unrestricted En
 - **Review consequential manual gates by risk.** A contributor's single 17-gate course audit found that its only manual gate was also its most consequential. Use that observation as a prompt for stronger review, not as evidence of a general correlation between checkability and risk. Cite exact evidence and obtain a second review when the consequence warrants it.
 - **Keep evidence decisive.** Record the smallest output that proves the outcome. Do not paste full logs into a ledger.
 
+### Lint the ledger before working it
+
+The rules above are prose, and prose is the layer this project already treats as weakest. `gate-lint.mjs` makes the mechanical subset of them checkable. It never executes a `CHECK:`; it reads the ledger and judges its oracles.
+
+```text
+node scripts/gate-lint.mjs GATES.md
+node scripts/gate-lint.mjs --strict --json .unlazy/<scope>/gates/leaf-1.1.1.md
+```
+
+Errors are oracles that cannot fail: a command whose output is fixed by its own text, and an expectation that appears verbatim inside the command that is supposed to prove it. Warnings are weaker signals: an expectation drawn from vocabulary that failure output also uses, a slash wrapped literal path silently read as a regular expression, a title that names an activity rather than an outcome, a number that nothing measures, and a ledger outside the five to twelve band.
+
+Exit `0` is clean, `1` reports findings, `2` means the shared parser rejected the ledger. `--strict` promotes warnings to failures. A lint finding is a prompt to sharpen the gate, not proof that the outcome is wrong.
+
+Make a ledger require its own quality by linting as a gate:
+
+```markdown
+- [ ] G0: this ledger states outcomes that can fail
+  CHECK: node scripts/gate-lint.mjs GATES.md
+  EXPECT: LINT OK
+  EVIDENCE: pending
+```
+
 ## Abandonment
 
 Use abandonment only when a required outcome is genuinely impossible within the authorized task. Keep the original gate, add one non-empty reason, and name the abandonment in the final report. An abandonment is a visible handoff, not a passing check. If an entire requested deliverable is abandoned, do not describe the task as fully complete.

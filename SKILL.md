@@ -66,6 +66,13 @@ Remember that the checker proves only the declared command oracle. It cannot inf
 - Review consequential manual gates with evidence proportional to risk. Try to make the riskiest outcome runnable, but do not claim that manual status and risk generally correlate.
 - Prefer portable Node scripts. Do not assume `grep`, `tail`, or `tr` exists on stock Windows.
 - Re-run with the same declared shell and required toolchain. Treat an environment mismatch as a failed verification, not as evidence.
+- Lint the ledger before working it, so an oracle that cannot fail is caught at authoring time rather than certified at report time:
+
+```
+node <skill-dir>/scripts/gate-lint.mjs GATES.md
+```
+
+Fix every error it reports. Treat each warning as a prompt to sharpen the gate. Details in [references/gates.md](references/gates.md).
 
 ## Audit the final report
 

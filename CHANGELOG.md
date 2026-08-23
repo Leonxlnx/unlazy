@@ -4,6 +4,10 @@
 
 This section describes the current source tree. It does not claim that `2.1.0` has a Git tag or GitHub Release.
 
+### Gate authoring
+
+- Add `scripts/gate-lint.mjs`, a non-executing audit of ledger quality. Report as errors the oracles that cannot fail: a command whose output is fixed by its own text, and an expectation that appears verbatim inside the command meant to prove it. Report as warnings an expectation drawn from failure vocabulary, a slash wrapped literal path read as a regular expression, a title that names an activity rather than an outcome, an unmeasured number, and a ledger outside the documented size band. Reuse the shared parser, add `--strict` and `--json`, and emit `LINT OK` so a ledger can require its own quality as a gate.
+
 ### Correctness and fail-closed behavior
 
 - Replace positional-argument index arithmetic with a validating CLI parser. An explicitly named ledger is the only ledger targeted, regardless of option order.
