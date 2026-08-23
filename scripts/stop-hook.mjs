@@ -7,6 +7,7 @@ import {
   UNLAZY_DIR, gateState, hookStatePath, parseGates, qualify, resolveTarget,
   sha256, validateScopeId, withFileLock, writeAtomic,
 } from "./lib/gates.mjs";
+import { dispatchIssues } from "./lib/dispatch.mjs";
 
 const MAX_BLOCKS = 6;
 const args = process.argv.slice(2);
@@ -58,14 +59,16 @@ async function clearSessionState() {
   }
 }
 
-if (!target.files.length) {
+const dispatch = dispatchIssues(root, target.scope);
+
+if (!target.files.length && !dispatch.length) {
   await clearSessionState();
   allow(null);
 }
 
-const unmet = [];
+const unmet = [...dispatch];
 const invalid = [];
-let combined = "";
+let combined = "dispatch\0" + dispatch.join("\0") + "\0";
 for (const file of [...target.files].sort()) {
   let text;
   try { text = readFileSync(file, "utf8"); }
@@ -125,7 +128,7 @@ if (sessionState.blocks > MAX_BLOCKS) {
 const list = outstanding.slice(0, 5).join(", ") + (outstanding.length > 5 ? ", +" + (outstanding.length - 5) + " more" : "");
 console.log(JSON.stringify({
   decision: "block",
-  reason: "unlazy" + where + ": " + outstanding.length + " gate/ledger item(s) need work: " + list +
+  reason: "unlazy" + where + ": " + outstanding.length + " gate/ledger/dispatch item(s) need work: " + list +
     ". Run gate-check.mjs --status to inspect without execution. To run inherited CHECK lines, inspect them and use --approve. " +
     "Use ABANDON: <id> <non-blank reason> only when a gate is genuinely impossible.",
 }));

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DISPATCH_CHECK = join(HERE, "..", "scripts", "dispatch-check.mjs");
+const STOP_HOOK = join(HERE, "..", "scripts", "stop-hook.mjs");
 const filter = process.argv[2] || "";
 const tests = [];
 
@@ -32,9 +33,9 @@ function sandbox() {
   };
 }
 
-function run(args, options = {}) {
+function runScript(script, args, options = {}) {
   return new Promise((resolveResult) => {
-    execFile(process.execPath, [DISPATCH_CHECK, ...args], {
+    const child = execFile(process.execPath, [script, ...args], {
       cwd: options.cwd,
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
@@ -44,7 +45,29 @@ function run(args, options = {}) {
         out: (stdout || "") + (stderr || ""),
       });
     });
+    if (options.stdin !== undefined) child.stdin.end(options.stdin);
   });
+}
+
+const run = (args, options = {}) => runScript(DISPATCH_CHECK, args, options);
+
+function launchTimedWorker(directory, name, durationMs = 600) {
+  const output = join(directory, name + ".json");
+  const source = [
+    "const fs = require('fs')",
+    "const output = process.argv[1]",
+    "const duration = Number(process.argv[2])",
+    "const start = Date.now()",
+    "setTimeout(() => fs.writeFileSync(output, JSON.stringify({ start, end: Date.now() })), duration)",
+  ].join(";");
+  let child;
+  const done = new Promise((resolveResult, reject) => {
+    child = execFile(process.execPath, ["-e", source, output, String(durationMs)], { cwd: directory }, (error) => {
+      if (error) reject(error);
+      else resolveResult(JSON.parse(readFileSync(output, "utf8")));
+    });
+  });
+  return { handle: "pid:" + child.pid, done };
 }
 
 const base = (command, wave = "ready-1") => [command, "--scope", "api", "--wave", wave];
@@ -150,6 +173,50 @@ test("validation: malformed ids, handles, and state fail closed", async () => {
     result = await run(base("status"), { cwd: s.dir });
     assert(result.code === 2, "malformed state should exit 2, got " + result.code);
     assertHas(result.out, "invalid dispatch state");
+  } finally { s.cleanup(); }
+});
+
+test("hook: an incomplete dispatch wave blocks an otherwise complete scope", async () => {
+  const s = sandbox();
+  try {
+    s.write(".unlazy/api/GATES.md", "# Gates\n\n- [x] G1: complete\n  EVIDENCE: checked by test\n");
+    await run([...base("open"), "--leaf", "leaf-a", "--leaf", "leaf-b"], { cwd: s.dir });
+    await run([...base("start"), "--leaf", "leaf-a", "--handle", "codex:a"], { cwd: s.dir });
+
+    const stdin = JSON.stringify({ cwd: s.dir, session_id: "dispatch-hook-test" });
+    let result = await runScript(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+    assertHas(result.out, '"decision":"block"');
+    assertHas(result.out, "dispatch:ready-1");
+
+    await run([...base("start"), "--leaf", "leaf-b", "--handle", "codex:b"], { cwd: s.dir });
+    await run(base("seal"), { cwd: s.dir });
+    await run([...base("return"), "--leaf", "leaf-a"], { cwd: s.dir });
+    await run([...base("return"), "--leaf", "leaf-b"], { cwd: s.dir });
+    result = await runScript(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+    assert(result.out.trim() === "", "complete dispatch should allow Stop, got " + result.out);
+  } finally { s.cleanup(); }
+});
+
+test("overlap: native starts precede waits and workers run simultaneously", async () => {
+  const s = sandbox();
+  try {
+    await run([...base("open"), "--leaf", "leaf-a", "--leaf", "leaf-b"], { cwd: s.dir });
+
+    const a = launchTimedWorker(s.dir, "leaf-a");
+    await run([...base("start"), "--leaf", "leaf-a", "--handle", a.handle], { cwd: s.dir });
+    const b = launchTimedWorker(s.dir, "leaf-b");
+    await run([...base("start"), "--leaf", "leaf-b", "--handle", b.handle], { cwd: s.dir });
+    await run(base("seal"), { cwd: s.dir });
+
+    const [aTiming, bTiming] = await Promise.all([a.done, b.done]);
+    const overlap = Math.min(aTiming.end, bTiming.end) - Math.max(aTiming.start, bTiming.start);
+    assert(overlap > 0, "expected worker execution intervals to overlap, got " + overlap + "ms");
+
+    await run([...base("return"), "--leaf", "leaf-a"], { cwd: s.dir });
+    await run([...base("return"), "--leaf", "leaf-b"], { cwd: s.dir });
+    const status = await run(base("status"), { cwd: s.dir });
+    assert(status.code === 0, status.out);
+    assertHas(status.out, "COMPLETE ready-1 (2/2 returned)");
   } finally { s.cleanup(); }
 });
 
