@@ -15,6 +15,9 @@
 // Progress = the combined content of the gate files changed since last block.
 // State lives in .unlazy-hook-state.json next to the gates (add to .gitignore).
 //
+// Argv is ignored. The installer appends "--unlazy" so its own entries stay
+// identifiable in settings without depending on the install path.
+//
 // Contract (docs: code.claude.com/docs/en/hooks):
 //   stdin  JSON with { cwd, stop_hook_active, ... }
 //   stdout {"decision":"block","reason":"..."} + exit 0 to block; exit 0 silent to allow.
