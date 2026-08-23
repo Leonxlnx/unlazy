@@ -6,7 +6,7 @@ import {
   closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync,
   statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { randomBytes } from "node:crypto";
 import { delimiter, dirname, basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -437,7 +437,7 @@ function runCheck(task) {
     const stopChild = () => {
       if (closeStreamsTimer) return;
       try {
-        if (process.platform === "win32") child.kill("SIGKILL");
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", child.pid, "/f", "/t"], { stdio: "ignore" });
         else process.kill(-child.pid, "SIGKILL");
       } catch {
         try { child.kill("SIGKILL"); } catch { /* already gone */ }
