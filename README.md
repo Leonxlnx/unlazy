@@ -195,6 +195,7 @@ So: models default to minimum effort, effort responds to structure, and structur
 
 Everything cited, newest first:
 
+- [Test-Time Scaling in Reasoning Models Is Not Effective for Knowledge-Intensive Tasks Yet](https://arxiv.org/abs/2509.06861) (COLM 2026): more test-time compute often raises hallucination rates, and compute-only scaling cannot add new information.
 - [Fortune: Advanced AI is showing signs of laziness](https://fortune.com/2026/07/28/advanced-ai-models-laziness-open-ai-anthropic/) (July 2026)
 - [When More Thinking Hurts: Overthinking in LLM Test-Time Compute Scaling](https://arxiv.org/abs/2604.10739) (April 2026)
 - [SlopCodeBench: How Coding Agents Degrade Over Long-Horizon Iterative Tasks](https://arxiv.org/abs/2603.24755) (March 2026)
