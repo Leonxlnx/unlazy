@@ -34,8 +34,8 @@ Replace every placeholder before running the checker.
 N1 must name every direct child explicitly and use --reverify, not --status.
 Status reports old evidence without executing it. Keep --jobs 1 unless the child
 checks are independent and deterministic parallel execution is intentional.
-If a child reports an abandonment, mark the branch ABANDONED and surface the
-handoff; do not treat the checker's remaining-gates `ALL MET` line as full completion.
+If a child reports an abandonment, N1 exits 1 with `HANDOFF REQUIRED`. Mark the
+branch ABANDONED and surface the handoff; never rewrite that result as completion.
 
 Branch paths use node-<id>.md. Leaf paths use leaf-<id>.md. Branch completion
 requires integration evidence; a set of locally complete leaves is not enough.

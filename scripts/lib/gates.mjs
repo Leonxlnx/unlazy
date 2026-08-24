@@ -2,7 +2,7 @@
 // Zero dependencies. Node 16+.
 
 import {
-  appendFileSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
   openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -46,9 +46,13 @@ const GATE_RE = /^- \[( |x|X)\] (.*)$/;
 const ATTR_RE = /^(\s+)(CHECK|EXPECT|EVIDENCE|CWD):\s?(.*)$/;
 const UNINDENTED_ATTR_RE = /^(CHECK|EXPECT|EVIDENCE|CWD):\s?(.*)$/;
 const ABANDON_RE = /^ABANDON:\s*(\S*)\s*(.*)$/;
+const INDENTED_ABANDON_RE = /^\s+ABANDON:/;
 const OWNS_RE = /^OWNS:\s*(.*)$/;
 const FENCE_OPEN_RE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 const REGEX_RE = /^\/([\s\S]*)\/([a-z]*)$/;
+// A pattern author escapes an inner slash or has none. A literal path always
+// carries one, so an unescaped inner slash marks the ambiguous reading.
+const UNESCAPED_SLASH_RE = /(^|[^\\])\//;
 const SCOPE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function parseRegex(expect) {
@@ -62,7 +66,12 @@ function parseRegex(expect) {
   } catch (error) {
     return { error: "invalid EXPECT regex: " + error.message };
   }
-  return { kind: "regex", source: match[1], flags: match[2] };
+  return {
+    kind: "regex",
+    source: match[1],
+    flags: match[2],
+    pathLike: UNESCAPED_SLASH_RE.test(match[1]),
+  };
 }
 
 // The checker and Stop hook both consume this exact result. Diagnostics are
@@ -125,6 +134,16 @@ export function parseGates(text, options = {}) {
         errors.push("line " + (index + 1) + ": duplicate gate id " + id +
           " (first declared on line " + ids.get(id) + ")");
       } else ids.set(id, index + 1);
+      continue;
+    }
+
+    // Attributes must be indented and ABANDON must not be, so the two rules
+    // point opposite ways. Diagnose the indented abandonment rather than
+    // ignoring it, or the author's honest exit fails with no explanation.
+    if (INDENTED_ABANDON_RE.test(line)) {
+      errors.push("line " + (index + 1) +
+        ": indented ABANDON is not applied; start ABANDON at column 1");
+      current = null;
       continue;
     }
 
@@ -202,12 +221,20 @@ export function parseGates(text, options = {}) {
     if (hasExpect) {
       const parsed = parseRegex(gate.expect);
       if (parsed.error) errors.push("gate " + gate.id + ": " + parsed.error);
+      else if (parsed.pathLike) {
+        // Warn rather than reject: the pattern reading may be intended, and a
+        // literal path cannot be expressed once the wrapping slashes sniff.
+        warnings.push("gate " + gate.id + ": EXPECT " + JSON.stringify(gate.expect) +
+          " is read as a regular expression, so its dots and other metacharacters" +
+          " are wildcards. Escape the inner slashes to keep the pattern, or drop" +
+          " the wrapping slashes to match a literal substring.");
+      }
       gate.expectation = parsed;
     } else gate.expectation = null;
   }
 
   for (const id of abandoned.keys()) {
-    if (!ids.has(id)) warnings.push("ABANDON references unknown gate " + id);
+    if (!ids.has(id)) errors.push("ABANDON references unknown gate " + id);
   }
   if (options.requireGates !== false && gates.length === 0) errors.push("ledger contains zero live gates");
 
@@ -506,8 +533,35 @@ export async function withFileLock(root, target, fn, options = {}) {
 export function appendStatus(root, scope, line) {
   const path = statusLogPath(root, scope);
   assertSafeStatePath(root, path);
-  appendFileSync(path, String(line).replace(/\r?\n/g, " ") + "\n", { encoding: "utf8", mode: 0o600 });
-  return path;
+  let fd = null;
+  try {
+    try {
+      const before = lstatSync(path);
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+        throw new Error("refusing non-file or linked status log " + path);
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    // Open first but write only after proving that the named entry is the same
+    // regular file as the descriptor. A symlink swap can therefore never turn
+    // the append into a write through an outside-root target.
+    const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW || 0);
+    fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT |
+      (fsConstants.O_NONBLOCK || 0) | noFollow, 0o600);
+    const opened = fstatSync(fd);
+    const named = lstatSync(path);
+    if (!opened.isFile() || !named.isFile() || named.isSymbolicLink() ||
+        opened.nlink !== 1 || named.nlink !== 1 ||
+        opened.dev !== named.dev || opened.ino !== named.ino) {
+      throw new Error("refusing non-file or replaced status log " + path);
+    }
+    writeFileSync(fd, String(line).replace(/[\r\n]+/g, " ") + "\n", "utf8");
+    fsyncSync(fd);
+    return path;
+  } finally {
+    if (fd !== null) try { closeSync(fd); } catch { /* ignore */ }
+  }
 }
 
 function readLeasesUnlocked(root) {

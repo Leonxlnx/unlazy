@@ -16,6 +16,8 @@ import {
   hookStatePath, listScopes, parseGates, qualify, releaseLeases, resolveTarget,
   scopeRoot, sha256, sleep, tail, validateScopeId, withFileLock, writeAtomic,
 } from "./lib/gates.mjs";
+import { terminateProcessTree } from "./lib/process-tree.mjs";
+import { dispatchStatus } from "./lib/dispatch.mjs";
 
 const HELP = `usage: gate-check.mjs [options] [file ...]
 
@@ -178,7 +180,7 @@ if (action === "--log") {
   if (!scope) failUsage("--log needs --scope ID or exactly one discoverable pipeline");
   if (!String(opt.log).trim()) failUsage("--log needs non-blank text");
   try {
-    const path = appendStatus(root, scope, opt.log);
+    const path = await appendStatus(root, scope, opt.log);
     console.log("appended to " + path);
     process.exit(0);
   } catch (error) {
@@ -432,16 +434,38 @@ function runCheck(task) {
     let spawnError = null;
     let closed = false;
     let closeStreamsTimer = null;
+    let forceSettleTimer = null;
+    let timeoutTimer = null;
+    let cleanupDiagnostic = null;
     let child;
+
+    const settle = async (exitCode, signal) => {
+      if (closed) return;
+      closed = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (closeStreamsTimer) clearTimeout(closeStreamsTimer);
+      if (forceSettleTimer) clearTimeout(forceSettleTimer);
+      const stdout = Buffer.concat(chunks.stdout).toString("utf8");
+      const stderr = Buffer.concat(chunks.stderr).toString("utf8");
+      const output = stdout + (stdout && stderr ? "\n" : "") + stderr;
+      const match = timedOut || overflow || spawnError
+        ? { matched: false }
+        : await safeRegexMatch(task.gate.expectation, output);
+      const cleanupSuffix = cleanupDiagnostic ? "; cleanup: " + cleanupDiagnostic : "";
+      const error = timedOut ? "timed out after " + timeoutSeconds + "s" + cleanupSuffix
+        : overflow ? "output exceeded " + MAX_OUTPUT_BYTES + " bytes" + cleanupSuffix
+          : spawnError ? spawnError.message
+            : match.error || null;
+      done({
+        ...task, output, exitCode, signal, matched: Boolean(match.matched), error,
+        ok: !error && exitCode === 0 && Boolean(match.matched),
+      });
+    };
 
     const stopChild = () => {
       if (closeStreamsTimer) return;
-      try {
-        if (process.platform === "win32") child.kill("SIGKILL");
-        else process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
-      }
+      const cleanup = terminateProcessTree(child);
+      cleanupDiagnostic = cleanup.diagnostic;
       // A descendant that escaped the shell can otherwise keep inherited pipes
       // open forever. We still settle through the child's close event, after
       // giving stdio a short grace period to drain.
@@ -449,6 +473,16 @@ function runCheck(task) {
         try { child.stdout.destroy(); } catch { /* closed */ }
         try { child.stderr.destroy(); } catch { /* closed */ }
       }, 1000);
+      // A successful signal request is not proof that a child closed or that
+      // every pipe-holding descendant exited. Settle independently after the
+      // bounded helper attempt for every cleanup outcome, while retaining any
+      // explicit cleanup failure in the result.
+      forceSettleTimer = setTimeout(() => {
+        try { child.stdout.destroy(); } catch { /* closed */ }
+        try { child.stderr.destroy(); } catch { /* closed */ }
+        try { child.unref(); } catch { /* unavailable */ }
+        settle(null, null);
+      }, 1500);
     };
 
     const capture = (stream, chunk) => {
@@ -478,30 +512,11 @@ function runCheck(task) {
     child.stdout.on("data", (chunk) => capture("stdout", chunk));
     child.stderr.on("data", (chunk) => capture("stderr", chunk));
     child.once("error", (error) => { spawnError = error; });
-    const timer = setTimeout(() => {
+    timeoutTimer = setTimeout(() => {
       timedOut = true;
       stopChild();
     }, timeoutSeconds * 1000);
-    child.once("close", async (exitCode, signal) => {
-      if (closed) return;
-      closed = true;
-      clearTimeout(timer);
-      if (closeStreamsTimer) clearTimeout(closeStreamsTimer);
-      const stdout = Buffer.concat(chunks.stdout).toString("utf8");
-      const stderr = Buffer.concat(chunks.stderr).toString("utf8");
-      const output = stdout + (stdout && stderr ? "\n" : "") + stderr;
-      const match = timedOut || overflow || spawnError
-        ? { matched: false }
-        : await safeRegexMatch(task.gate.expectation, output);
-      const error = timedOut ? "timed out after " + timeoutSeconds + "s"
-        : overflow ? "output exceeded " + MAX_OUTPUT_BYTES + " bytes"
-          : spawnError ? spawnError.message
-            : match.error || null;
-      done({
-        ...task, output, exitCode, signal, matched: Boolean(match.matched), error,
-        ok: !error && exitCode === 0 && Boolean(match.matched),
-      });
-    });
+    child.once("close", settle);
   });
 }
 
@@ -636,6 +651,7 @@ let totalUnmet = 0;
 let totalAbandoned = 0;
 let reverified = 0;
 const unmetIds = [];
+const abandonedIds = [];
 const finalStates = new Map();
 for (const result of results) {
   if (opt.reverify && result.wasMet && !staleResults.has(resultKey(result.file, result.gate.id))) reverified++;
@@ -645,7 +661,10 @@ for (const ledger of ledgers) {
   for (const gate of ledger.doc.gates) {
     const state = gateState(gate, ledger.doc.abandoned);
     finalStates.set(resultKey(ledger.file, gate.id), state);
-    if (state === "abandoned") totalAbandoned++;
+    if (state === "abandoned") {
+      totalAbandoned++;
+      abandonedIds.push(qualify(ledger.file, gate.id));
+    }
     else if (state === "met") totalMet++;
     else {
       totalUnmet++;
@@ -657,6 +676,21 @@ for (const ledger of ledgers) {
     }
   }
   console.log(basename(ledger.file) + ": " + ledger.doc.gates.length + " gates");
+}
+
+// A scoped pipeline is complete only when both its ledgers and its native
+// dispatch waves are resolved. Per-wave `dispatch-check status` is useful for
+// inspection, but completion cannot depend on callers remembering a second
+// command (or on the optional Stop hook being installed).
+const aggregateDispatch = dispatchStatus(root, scope);
+if (aggregateDispatch.errors.length) {
+  for (const error of aggregateDispatch.errors) console.error("gate-check: " + error);
+  process.exit(2);
+}
+totalAbandoned += aggregateDispatch.abandoned.length;
+abandonedIds.push(...aggregateDispatch.abandoned);
+if (opt.status) {
+  for (const blocker of aggregateDispatch.blocking) console.log("  UNMET " + blocker);
 }
 
 const where = scope ? " [scope " + scope + "]" : "";
@@ -674,17 +708,27 @@ for (const [key, label] of staleResults) {
   const state = finalStates.get(key);
   if (state === "met" || state === undefined) extraUnmet.set(key, label + " (stale result discarded)");
 }
-const effectiveUnmet = totalUnmet + extraUnmet.size;
+const effectiveUnmet = totalUnmet + extraUnmet.size + aggregateDispatch.blocking.length;
 unmetIds.push(...extraUnmet.values());
+unmetIds.push(...aggregateDispatch.blocking);
 if (approvalInfrastructureFailures) {
   console.error("gate-check: infrastructure failure prevented " + approvalInfrastructureFailures + " approval(s)");
   process.exit(2);
 }
-if (effectiveUnmet === 0) {
-  console.log("ALL MET (" + totalMet + " met" + (totalAbandoned ? ", " + totalAbandoned + " abandoned" : "") + verifyNote + ")" + where);
+if (effectiveUnmet === 0 && totalAbandoned === 0) {
+  console.log("ALL MET (" + totalMet + " met" + verifyNote + ")" + where);
   process.exit(0);
 }
-console.log("UNMET: " + effectiveUnmet + " (met: " + Math.max(0, totalMet - extraUnmet.size) +
-  (totalAbandoned ? ", abandoned: " + totalAbandoned : "") + verifyNote + ")" + where);
-console.log("  " + unmetIds.slice(0, 12).join(", ") + (unmetIds.length > 12 ? ", +" + (unmetIds.length - 12) + " more" : ""));
+if (totalAbandoned) {
+  console.log("HANDOFF REQUIRED: " + totalAbandoned + " abandoned (met: " +
+    Math.max(0, totalMet - extraUnmet.size) + (effectiveUnmet ? ", unmet: " + effectiveUnmet : "") +
+    verifyNote + ")" + where);
+  console.log("  " + abandonedIds.slice(0, 12).join(", ") +
+    (abandonedIds.length > 12 ? ", +" + (abandonedIds.length - 12) + " more" : ""));
+}
+if (effectiveUnmet) {
+  console.log("UNMET: " + effectiveUnmet + " (met: " + Math.max(0, totalMet - extraUnmet.size) +
+    (totalAbandoned ? ", abandoned: " + totalAbandoned : "") + verifyNote + ")" + where);
+  console.log("  " + unmetIds.slice(0, 12).join(", ") + (unmetIds.length > 12 ? ", +" + (unmetIds.length - 12) + " more" : ""));
+}
 process.exit(1);

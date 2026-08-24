@@ -15,7 +15,7 @@ Before using an inherited ledger:
 
 Approval records live under `~/.unlazy/approved` by default. `UNLAZY_APPROVAL_DIR` may select another real directory, but the checker rejects a directory inside the repository. An approval is specific to the absolute ledger and gate, exact command and expectation, resolved working directory and shell, timeout, output and regex limits, platform, and full inherited `PATH`. A change to any bound input requires review and approval again. An approval is consent to execute; it is not evidence that the command matches the English gate title.
 
-Approval does not snapshot files that a command invokes. If a referenced script, generated file, executable, or dependency changes while the approved command text remains the same, inspect it again before running the command.
+Approval does not snapshot files that a command invokes. If a referenced script, generated file, executable, fixture, or dependency changes while the approved command text remains the same, the old approval can still authorize the changed bytes. Inspect those dependencies again before running the command. `--status` and the Stop hook report historical ledger state; neither revalidates artifacts. Run `--reverify` after dependency or input changes. When a workflow needs machine-enforced dependency currentness, put the expected dependency digests directly in approval-bound `CHECK:` text and validate them with a separately trusted tool or runtime. That remains user-designed coverage, not transitive tracing by unlazy.
 
 Approval and lease locks fail closed instead of being stolen automatically. If an owning process terminates unexpectedly, verify the PID recorded in that specific lock is no longer running and that no operation can still own it before removing the abandoned lock manually. Do not bulk-delete lock directories while unlazy is active.
 
@@ -31,15 +31,17 @@ See [references/gates.md](references/gates.md) for the full shell and success co
 
 ## Scopes and leases are not a sandbox
 
-Scopes limit unlazy's gate discovery, log target, hook association, and lease labels. Ownership leases coordinate tools that voluntarily use the protocol. Neither mechanism prevents a process from reading or writing another path.
+Scopes limit unlazy's gate discovery, log target, hook association, dispatch waves, and lease labels. Ownership leases and dispatch launch barriers coordinate tools that voluntarily use the protocol. Neither mechanism prevents a process from reading or writing another path.
 
 Separate worktrees can reduce ordinary path contention, but they may still share external caches and services. Use operating-system, container, or virtual-machine isolation for untrusted code. See [references/parallel.md](references/parallel.md).
 
 ## Stop hook and local state
 
-The optional Claude Code Stop hook scans ledgers and writes progress state. It does not execute `CHECK:` commands. It emits Claude Code's documented top-level block decision while the resolved session pipeline has unmet gates and releases after unlazy's own six no-progress blocks.
+The optional Claude Code Stop hook scans ledgers and dispatch state, then writes progress state. It does not execute `CHECK:` commands, revalidate old evidence, or create agent sessions. It emits Claude Code's documented top-level block decision while the resolved session pipeline has unmet gates or incomplete dispatch waves and releases after unlazy's own six no-progress blocks. Gate or dispatch abandonment is non-successful handoff state: Stop preserves a bounded `HANDOFF REQUIRED` system message in pure, mixed-blocking, and release outcomes. Repository-derived diagnostics are control-stripped and capped, and free-form abandonment reasons are never copied into the privileged message.
 
-Runtime and binding files live under `.unlazy/` in scoped mode. Legacy mode may use `.unlazy-hook-state.json`. Keep both paths in the project's ignore rules. Session ids in bindings are routing values, not secrets or authentication tokens.
+Runtime, binding, dispatch, and append-only audit files live under `.unlazy/` in scoped mode. Legacy mode may use `.unlazy-hook-state.json`. State writes reject symlink directories and targets; status append also rejects multi-link files and verifies that its opened descriptor still names the same single-link regular file before writing. Keep both paths in the project's ignore rules. Session ids in bindings and native agent ids in dispatch waves are routing values, not secrets or authentication tokens.
+
+On Windows timeout cleanup, unlazy accepts only the drive-root `<drive>:\Windows\System32\taskkill.exe` when the host-provided `SystemRoot`, `WINDIR`, and `SystemDrive` values agree; arbitrary, missing, or inconsistent roots are rejected, and it never searches the check's current directory or `PATH`. These launcher environment values are a consistency boundary, not cryptographic proof of OS identity. If the location cannot be established, cleanup falls back to the already-held child handle and the checker still settles on its own bounded timer. A successful signal request is not treated as proof of process exit.
 
 ## Installer targets and privacy
 
@@ -55,7 +57,9 @@ Install and uninstall preserve unrelated hooks. The installer refuses malformed 
 
 ## Evidence and logs
 
-Command output can contain private paths or other sensitive text. Gate evidence is deliberately capped, but it is still written into the ledger. Design checks to emit a concise success marker and avoid printing secrets. Review ledgers and status logs before committing or sharing them.
+Command output can contain private paths or other sensitive text. Gate evidence is deliberately capped, but it is still written into the ledger. Dispatch state contains timestamps and opaque host handles. Never put prompts, credentials, or result bodies in a handle. Design checks to emit a concise success marker and avoid printing secrets. Review ledgers, dispatch state, and status logs before committing or sharing them.
+
+A sealed wave proves only that the host returned a distinct native start handle for every declared leaf before Unlazy accepted a return. It does not prove exact CPU overlap, worker honesty, filesystem isolation, successful gates, or correct integration.
 
 Unlazy does not intentionally collect telemetry or send approval, gate, or hook-state records to a service. A `CHECK:` command can perform its own network or logging activity because it is arbitrary code.
 

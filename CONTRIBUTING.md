@@ -36,12 +36,16 @@ For script changes, add a regression that fails before the fix. Cover the releva
 - explicit one-file and multi-file targeting in different option orders
 - status versus re-verification and changed-oracle invalidation
 - zero gates, duplicates, incomplete attributes, fences, indentation, CRLF, and abandonment reasons
+- abandonment as non-successful checker/parent/Stop handoff, with bounded host messages
 - exit `0` plus `EXPECT:`, timeouts, missing commands, output limits, and evidence insertion
 - approval storage outside the repository and binding for ledger, gate, command, expectation, working directory, shell, timeout, limits, platform, and `PATH`
 - platform shell defaults, explicit shell override, inherited PATH, and paths containing spaces
+- Windows process-tree cleanup success, helper failure, direct-child fallback, and timeout settlement
 - sequential default and deterministic bounded `--jobs`
 - simultaneous conflicting lease claims, conservative glob overlap, unsafe paths, unknown leaves, and release
 - concurrent gate updates and concurrent session-keyed hook state
+- native dispatch open/start/seal/return, partial-launch abandonment, and semantic progress hashing
+- PLAN contract omissions, stale owners/observations, amendments, explicit removal, and the focused solo path
 - Stop-hook block, progress reset, six-block release, all-met cleanup, ambiguity, and session routing
 - installer install, idempotence, moved paths, target-shape refusal, unrelated-handler preservation, and uninstall
 

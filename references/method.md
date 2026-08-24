@@ -8,7 +8,7 @@ The original v1 method claimed that each binary split multiplied effort. A small
 
 1. **Make layer 1 the requested task.** Split only at real domain, component, or verification boundaries. Binary splits are optional.
 2. **Make each leaf one coherent deliverable.** Give it exact ownership, dependencies, and acceptance gates. Merge tiny adjacent leaves; split a leaf that hides several independent outcomes.
-3. **Fix contracts before fan-out.** Record interfaces, formats, shared assumptions, error conventions, naming, and ownership in `PLAN.md` before a leaf starts.
+3. **Fix contracts before fan-out.** Reread the original request and current amendments. Inventory every independently omittable required outcome and acceptance-changing constraint in `PLAN.md`, then record interfaces, formats, shared assumptions, error conventions, naming, and ownership before a leaf starts.
 4. **Give branches integration gates.** Verify child ledgers again, then test interfaces, end-to-end behavior, and regressions across the joined work.
 5. **Use gates and passes as the effort control.** Finish implementation, expert reread, defect hunt, and low-cost polish. Stop only when every required gate has current evidence and another improvement pass finds nothing.
 
@@ -25,6 +25,7 @@ When no depth is requested, choose the smallest tree that exposes every independ
 
 Before dispatch, make these decisions explicit:
 
+- stable contract item ids mapped to an owner and observing gate or manual review
 - exact files or relative globs each leaf owns
 - interfaces and schemas shared between leaves
 - dependency ids and readiness states
@@ -32,6 +33,8 @@ Before dispatch, make these decisions explicit:
 - error and compatibility conventions
 - which branch gates prove integration
 - who performs high-risk manual review
+
+Optional ideas are not requirements. Paraphrase only acceptance-relevant facts; never copy credentials, private request text, or unrelated context into repository state. Increment the contract revision when the user changes scope, reconcile every affected mapping before new dispatch, and use `REMOVED_BY_USER` only with explicit user authority.
 
 Do not let two concurrent leaves own the same path. If shared work cannot be separated, make it an earlier dependency or a dedicated integration leaf.
 
@@ -41,6 +44,6 @@ Do not let two concurrent leaves own the same path. If shared work cannot be sep
 |---|---|
 | Leaf | Current runnable evidence plus reviewed manual evidence |
 | Branch | Reverified children plus cross-child integration checks |
-| Root | Every branch integrated, regressions checked, final claims remeasured |
+| Root | Current request reread, every contract row reconciled, every branch integrated, regressions checked, final claims remeasured |
 
-Local completion does not imply integration. Verify from leaves upward and report only after the root ledger is satisfied.
+Local completion does not imply integration. Verify from leaves upward and report only after the root ledger and current contract inventory are satisfied. A missing owner or observation, stale reference, abandonment, deferment, or owner decision is a visible handoff, not completion.

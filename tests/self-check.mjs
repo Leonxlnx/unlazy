@@ -17,13 +17,20 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPTS = [
   "scripts/gate-check.mjs",
+  "scripts/gate-lint.mjs",
+  "scripts/dispatch-check.mjs",
   "scripts/stop-hook.mjs",
   "scripts/install-hooks.mjs",
   "scripts/lib/gates.mjs",
+  "scripts/lib/dispatch.mjs",
+  "scripts/lib/process-tree.mjs",
   "scripts/lib/regex-worker.mjs",
   "tests/run-tests.mjs",
+  "tests/dispatch-tests.mjs",
   "tests/hardening-tests.mjs",
   "tests/stress-tests.mjs",
+  "tests/lint-tests.mjs",
+  "tests/contract-tests.mjs",
   "tests/self-check.mjs",
 ];
 
@@ -101,6 +108,38 @@ check("every reference doc the skill links to exists", () => {
 check("all executable sources retain the Node 16 floor", () => {
   const bad = SCRIPTS.filter(p => /Node 1[89]\+/.test(read(p)));
   return bad.length ? "newer runtime claim in: " + bad.join(", ") : null;
+});
+
+check("the PLAN template carries a revisioned contract denominator", () => {
+  const plan = read("templates/PLAN.md");
+  const required = [
+    "Current contract inventory", "Contract revision", "Required outcome or constraint",
+    "Owner", "Observing gate or manual review", "Disposition", "REMOVED_BY_USER",
+  ];
+  const missing = required.filter((token) => !plan.includes(token));
+  return missing.length ? "PLAN contract inventory missing: " + missing.join(", ") : null;
+});
+
+check("request reconciliation keeps the focused solo cheap path", () => {
+  const skill = read("SKILL.md");
+  if (!skill.toLowerCase().includes("re-read the current request")) return "SKILL.md lacks final request reread";
+  if (!skill.includes("a PLAN table is not required")) return "focused solo path was made needlessly orchestrated";
+  if (!read("references/orchestration.md").includes("review every current contract row")) {
+    return "orchestration guide lacks final contract reconciliation";
+  }
+  return null;
+});
+
+check("abandonment is terminal handoff rather than ALL MET", () => {
+  const checker = read("scripts/gate-check.mjs");
+  const hook = read("scripts/stop-hook.mjs");
+  if (!checker.includes("HANDOFF REQUIRED") || !checker.includes("totalAbandoned === 0")) {
+    return "gate checker can still classify abandonment as completion";
+  }
+  if (!hook.includes("HANDOFF REQUIRED") || !hook.includes("handoffs")) {
+    return "Stop hook does not surface bounded abandonment handoff";
+  }
+  return null;
 });
 
 let passed = 0;

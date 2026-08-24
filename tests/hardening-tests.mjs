@@ -2,17 +2,21 @@
 // Security, parser, execution, and writeback regressions. Zero dependencies.
 
 import {
-  appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
+  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
   writeFileSync,
 } from "node:fs";
 import { execFile } from "node:child_process";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import {
+  terminateProcessTree, windowsTaskkillPath, WINDOWS_TASKKILL_TIMEOUT_MS,
+} from "../scripts/lib/process-tree.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GATE_CHECK = join(HERE, "..", "scripts", "gate-check.mjs");
 const STOP_HOOK = join(HERE, "..", "scripts", "stop-hook.mjs");
+const WINDOWS_ENV = { SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows", SystemDrive: "C:" };
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
@@ -71,6 +75,27 @@ const gate = (id, title, check, expect, extra = "") =>
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const has = (text, value, label = "output") => assert(text.includes(value), label + " missing " + JSON.stringify(value) + "\n" + text);
 const lacks = (text, value, label = "output") => assert(!text.includes(value), label + " unexpectedly includes " + JSON.stringify(value) + "\n" + text);
+
+async function waitForPath(path, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for " + path);
+    await new Promise((done) => setTimeout(done, 20));
+  }
+}
+
+function processExists(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code === "EPERM"; }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (processExists(pid)) {
+    if (Date.now() >= deadline) throw new Error("process " + pid + " remained alive after cleanup");
+    await new Promise((done) => setTimeout(done, 25));
+  }
+}
 
 test("approval: status is read-only and an unapproved CHECK is printed but not run", async () => {
   const s = sandbox();
@@ -261,6 +286,7 @@ test("parser: malformed ledgers are usage errors in checker and blocking in hook
     ["orphan attribute", "  CHECK: node x.mjs\n- [ ] G1: manual\n  EVIDENCE: pending\n", "orphan CHECK"],
     ["missing id", "- [ ] outcome without id\n  EVIDENCE: pending\n", "explicit ID"],
     ["blank outcome", "- [ ] G1:\n  EVIDENCE: pending\n", "outcome is blank"],
+    ["unknown abandon", "- [x] G1: done\n  EVIDENCE: measured\nABANDON: TYPO wrong id\n", "ABANDON references unknown gate"],
   ];
   for (const [name, text, expected] of cases) {
     const s = sandbox();
@@ -343,10 +369,10 @@ test("jobs: runner waits for stdio close so delayed descendant output is visible
 test("writeback: a result cannot certify a gate whose oracle changed in flight", async () => {
   const s = sandbox();
   try {
-    s.write("slow.mjs", "setTimeout(()=>console.log('OLD'),500);\n");
+    s.write("slow.mjs", "import { writeFileSync } from 'node:fs'; writeFileSync('started.txt','yes'); setTimeout(()=>console.log('OLD'),800);\n");
     s.write("GATES.md", gate("G1", "stale", "node slow.mjs", "OLD"));
     const running = gateRun(s, []);
-    await new Promise((done) => setTimeout(done, 220));
+    await waitForPath(s.path("started.txt"));
     s.write("GATES.md", gate("G1", "stale", "node slow.mjs", "NEW"));
     const result = await running;
     has(result.out, "STALE GATES:G1");
@@ -359,10 +385,10 @@ test("writeback: a result cannot certify a gate whose oracle changed in flight",
 test("reverify: a stale in-flight result cannot leave old evidence falsely green", async () => {
   const s = sandbox();
   try {
-    s.write("slow.mjs", "setTimeout(()=>console.log('OLD'),500);\n");
+    s.write("slow.mjs", "import { writeFileSync } from 'node:fs'; writeFileSync('started.txt','yes'); setTimeout(()=>console.log('OLD'),800);\n");
     s.write("GATES.md", "- [x] G1: stale met\n  CHECK: node slow.mjs\n  EXPECT: OLD\n  EVIDENCE: old evidence\n");
     const running = gateRun(s, ["--reverify"]);
-    await new Promise((done) => setTimeout(done, 220));
+    await waitForPath(s.path("started.txt"));
     s.write("GATES.md", "- [x] G1: stale met\n  CHECK: node slow.mjs\n  EXPECT: NEW\n  EVIDENCE: old evidence\n");
     const result = await running;
     assert(result.code === 1, "stale reverify returned " + result.code + "\n" + result.out);
@@ -442,6 +468,296 @@ test("leases: unsafe declarations, unknown leaves, and wildcard witnesses fail c
     assert(unsafe.code === 2, unsafe.out);
     has(unsafe.out, "cannot contain traversal");
   } finally { s.cleanup(); }
+});
+
+test("parser: an indented ABANDON is diagnosed instead of silently ignored", async () => {
+  const s = sandbox();
+  try {
+    // Every other attribute must be indented, so indenting the abandonment is
+    // the natural mistake. Ignoring the line silently leaves the gate unmet
+    // with no diagnostic, so the honest exit fails for a formatting reason the
+    // author is never told about.
+    s.write("GATES.md", [
+      "# Gates: indented abandonment",
+      "",
+      "Scope: an abandonment indented like every other attribute",
+      "",
+      "- [ ] G1: upstream export reconciles",
+      "  EVIDENCE: pending",
+      "  ABANDON: G1 upstream export was withdrawn",
+      "",
+    ].join("\n"));
+    const result = await gateRun(s, ["--status"], { approve: false });
+    assert(result.code === 2, "expected a parse error, got " + result.code + "\n" + result.out);
+    has(result.out, "indented ABANDON");
+    has(result.out, "column 1");
+  } finally { s.cleanup(); }
+});
+
+test("parser: a slash wrapped literal path warns that it became a regex", async () => {
+  const s = sandbox();
+  try {
+    // "/etc/app/conf/" is a plausible literal expectation, and the slash sniff
+    // silently turns it into the pattern etc/app/conf, whose dots would be
+    // wildcards. There is no way to express that literal, so the author needs
+    // to be told which reading applies.
+    s.write("show.mjs", "console.log('resolved /etc/app/conf/');\n");
+    s.write("GATES.md", gate("G1", "config path is reported", "node show.mjs", "/etc/app/conf/"));
+    const warned = await gateRun(s, ["--status"], { approve: false });
+    has(warned.out, "G1");
+    has(warned.out, "read as a regular expression");
+    assert(warned.code === 1, "a warning must not become a parse error, got " + warned.code);
+
+    // A deliberate pattern carries no unescaped inner slash and stays quiet.
+    s.write("GATES.md", gate("G2", "typecheck is clean", "node show.mjs", "/Found 0 errors/"));
+    const quiet = await gateRun(s, ["--status"], { approve: false });
+    lacks(quiet.out, "read as a regular expression");
+
+    // Escaping keeps the pattern reading without the warning.
+    s.write("GATES.md", gate("G3", "path pattern", "node show.mjs", "/etc\\/app/"));
+    const escaped = await gateRun(s, ["--status"], { approve: false });
+    lacks(escaped.out, "read as a regular expression");
+  } finally { s.cleanup(); }
+});
+
+test("win32 cleanup: taskkill ENOENT invokes child.kill fallback", async () => {
+  const calls = [];
+  const child = { pid: 4242, kill(signal) { calls.push(signal); return true; } };
+  const result = terminateProcessTree(child, {
+    platform: "win32",
+    env: { ...WINDOWS_ENV, PATH: "C:\\shadow" },
+    spawnSyncImpl: () => ({ status: null, signal: null, error: Object.assign(new Error("missing"), { code: "ENOENT" }) }),
+  });
+  assert(result.fallback && result.ok, JSON.stringify(result));
+  assert(calls.join(",") === "SIGKILL", "expected SIGKILL fallback, got " + calls.join(","));
+  has(result.diagnostic, "ENOENT");
+});
+
+test("win32 cleanup: taskkill itself has a bounded timeout", async () => {
+  const calls = [];
+  let invocation = null;
+  const child = { pid: 4243, kill(signal) { calls.push(signal); return true; } };
+  const result = terminateProcessTree(child, {
+    platform: "win32",
+    env: WINDOWS_ENV,
+    spawnSyncImpl: (command, args, options) => {
+      invocation = { command, args, options };
+      return { status: null, signal: "SIGKILL", error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) };
+    },
+  });
+  assert(invocation.options.timeout === WINDOWS_TASKKILL_TIMEOUT_MS, JSON.stringify(invocation));
+  assert(invocation.options.killSignal === "SIGKILL", JSON.stringify(invocation));
+  assert(result.ok && result.fallback, JSON.stringify(result));
+  assert(calls.join(",") === "SIGKILL", "helper timeout did not request direct fallback");
+  has(result.diagnostic, "ETIMEDOUT");
+});
+
+test("win32 cleanup: nonzero taskkill status invokes fallback and checker settles", async () => {
+  const calls = [];
+  const child = { pid: 4343, kill(signal) { calls.push(signal); return true; } };
+  const result = terminateProcessTree(child, {
+    platform: "win32",
+    env: WINDOWS_ENV,
+    spawnSyncImpl: () => ({ status: 5, signal: null, error: null }),
+  });
+  assert(result.fallback && result.ok, JSON.stringify(result));
+  assert(calls.length === 1, "fallback was not requested exactly once");
+  has(result.diagnostic, "exit 5");
+});
+
+test("win32 cleanup: a false child.kill result is reported as fallback failure", async () => {
+  const child = { pid: 4444, kill() { return false; } };
+  const result = terminateProcessTree(child, {
+    platform: "win32",
+    env: WINDOWS_ENV,
+    spawnSyncImpl: () => ({ status: 5, signal: null, error: null }),
+  });
+  assert(!result.ok && result.fallback, JSON.stringify(result));
+  has(result.diagnostic, "returned false");
+});
+
+test("win32 cleanup: internal taskkill resolution cannot be shadowed by test PATH", async () => {
+  const expected = win32.join("C:\\Windows", "System32", "taskkill.exe");
+  const resolved = windowsTaskkillPath({ ...WINDOWS_ENV, PATH: "C:\\attacker" });
+  assert(resolved === expected, "expected system taskkill, got " + resolved);
+  lacks(resolved.toLowerCase(), "attacker");
+});
+
+test("win32 cleanup: a non-C system drive keeps protected tree cleanup", async () => {
+  const expected = win32.join("D:\\Windows", "System32", "taskkill.exe");
+  const resolved = windowsTaskkillPath({
+    SystemRoot: "D:\\Windows",
+    WINDIR: "D:\\Windows",
+    SystemDrive: "D:",
+    PATH: "D:\\repo",
+  });
+  assert(resolved === expected, "expected non-C system taskkill, got " + resolved);
+});
+
+test("win32 cleanup: inconsistent system directory variables fail closed", async () => {
+  const mismatches = [
+    { SystemRoot: "D:\\Windows", WINDIR: "C:\\Windows", SystemDrive: "C:" },
+    { SystemRoot: "D:\\Windows", WINDIR: "D:\\Windows", SystemDrive: "C:" },
+    { SystemRoot: "D:\\Windows", WINDIR: "D:\\Windows" },
+  ];
+  for (const env of mismatches) {
+    assert(windowsTaskkillPath(env) === null, "trusted inconsistent Windows environment: " + JSON.stringify(env));
+  }
+});
+
+test("win32 cleanup: missing trusted system root skips PATH lookup", async () => {
+  let spawned = false;
+  let killed = false;
+  const child = { pid: 4545, kill() { killed = true; return true; } };
+  const result = terminateProcessTree(child, {
+    platform: "win32",
+    env: { PATH: "C:\\attacker" },
+    spawnSyncImpl: () => { spawned = true; return { status: 0 }; },
+  });
+  assert(windowsTaskkillPath({ PATH: "C:\\attacker" }) === null, "bare taskkill fallback remained enabled");
+  assert(!spawned, "untrusted PATH was used to resolve taskkill");
+  assert(killed && result.ok && result.fallback, JSON.stringify(result));
+  has(result.diagnostic, "trusted system taskkill path unavailable");
+});
+
+test("win32 cleanup: an arbitrary absolute SystemRoot is not executable trust", async () => {
+  let spawned = false;
+  let killed = false;
+  const child = { pid: 4546, kill() { killed = true; return true; } };
+  const hostile = { SystemRoot: "C:\\repo\\fake-windows", PATH: "C:\\repo" };
+  const result = terminateProcessTree(child, {
+    platform: "win32",
+    env: hostile,
+    spawnSyncImpl: () => { spawned = true; return { status: 0 }; },
+  });
+  assert(windowsTaskkillPath(hostile) === null, "repository SystemRoot was trusted");
+  assert(!spawned && killed && result.ok && result.fallback, JSON.stringify(result));
+});
+
+test("cleanup: an already-exited child is never signalled through a reusable PID", async () => {
+  let spawned = false;
+  let killed = false;
+  const child = { pid: 4646, exitCode: 0, signalCode: null, kill() { killed = true; return true; } };
+  const result = terminateProcessTree(child, {
+    platform: "win32",
+    env: WINDOWS_ENV,
+    spawnSyncImpl: () => { spawned = true; return { status: 0 }; },
+  });
+  assert(result.ok && result.diagnostic === "child already exited", JSON.stringify(result));
+  assert(!spawned && !killed, "an exited child PID was reused for cleanup");
+});
+
+test("posix cleanup: an exited leader does not suppress its live process group", async () => {
+  let group = null;
+  let direct = false;
+  const child = { pid: 4747, exitCode: 0, signalCode: null, kill() { direct = true; return true; } };
+  const result = terminateProcessTree(child, {
+    platform: "linux",
+    killGroup(pid, signal) { group = { pid, signal }; },
+  });
+  assert(result.ok && !result.fallback, JSON.stringify(result));
+  assert(group.pid === -4747 && group.signal === "SIGKILL", JSON.stringify(group));
+  assert(!direct, "exited leader was signalled directly");
+});
+
+test("win32 integration: a timed-out shell and nested descendant are both reaped", async () => {
+  if (process.platform !== "win32") return;
+  const s = sandbox();
+  const pids = [];
+  try {
+    s.write("descendant.mjs", "setInterval(() => {}, 1000);\n");
+    s.write("parent.mjs", [
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      "writeFileSync('shell.pid', String(process.ppid));",
+      "const child = spawn(process.execPath, ['descendant.mjs'], { stdio: 'inherit' });",
+      "writeFileSync('descendant.pid', String(child.pid));",
+      "setInterval(() => {}, 1000);",
+      "",
+    ].join("\n"));
+    s.write("GATES.md", gate("G1", "nested process times out", "node parent.mjs", "never printed"));
+    const started = Date.now();
+    const result = await gateRun(s, ["--timeout", "1"]);
+    const elapsed = Date.now() - started;
+    assert(result.code === 1, result.out);
+    has(result.out, "timed out after 1s");
+    assert(elapsed < 12000, "bounded timeout took " + elapsed + "ms\n" + result.out);
+    await waitForPath(s.path("shell.pid"));
+    await waitForPath(s.path("descendant.pid"));
+    pids.push(Number(s.read("shell.pid")), Number(s.read("descendant.pid")));
+    assert(pids.every((pid) => Number.isInteger(pid) && pid > 0), "invalid captured PIDs: " + pids.join(","));
+    await Promise.all(pids.map((pid) => waitForProcessExit(pid)));
+  } finally {
+    for (const pid of pids) try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    s.cleanup();
+  }
+});
+
+test("execution: timeout settlement is bounded even when a detached descendant keeps pipes", async () => {
+  const s = sandbox();
+  let descendantPid = null;
+  try {
+    s.write("pipe-holder.mjs", "setInterval(() => {}, 1000);\n");
+    s.write("escape.mjs", [
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      "const child = spawn(process.execPath, ['pipe-holder.mjs'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });",
+      "writeFileSync('pipe-holder.pid', String(child.pid));",
+      "child.unref();",
+      "setInterval(() => {}, 1000);",
+      "",
+    ].join("\n"));
+    s.write("GATES.md", gate("G1", "escaped pipe holder times out", "node escape.mjs", "never printed"));
+    const started = Date.now();
+    const result = await gateRun(s, ["--timeout", "1"]);
+    const elapsed = Date.now() - started;
+    assert(result.code === 1, result.out);
+    has(result.out, "timed out after 1s");
+    assert(elapsed < 7000, "checker did not settle independently after cleanup request: " + elapsed + "ms");
+    await waitForPath(s.path("pipe-holder.pid"));
+    descendantPid = Number(s.read("pipe-holder.pid"));
+  } finally {
+    if (Number.isInteger(descendantPid) && descendantPid > 0) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    s.cleanup();
+  }
+});
+
+test("posix integration: an exited shell leader still has its ordinary descendants reaped", async () => {
+  if (process.platform === "win32") return;
+  const s = sandbox();
+  let descendantPid = null;
+  try {
+    s.write("ordinary-child.mjs", [
+      "import { writeFileSync } from 'node:fs';",
+      "setTimeout(() => writeFileSync('ordinary-marker.txt', 'survived'), 3000);",
+      "setInterval(() => {}, 1000);",
+      "",
+    ].join("\n"));
+    s.write("exiting-parent.mjs", [
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      "const child = spawn(process.execPath, ['ordinary-child.mjs'], { stdio: 'inherit' });",
+      "writeFileSync('ordinary-child.pid', String(child.pid));",
+      "child.unref();",
+      "",
+    ].join("\n"));
+    s.write("GATES.md", gate("G1", "orphaned group member times out", "node exiting-parent.mjs", "never printed"));
+    const result = await gateRun(s, ["--timeout", "1"]);
+    assert(result.code === 1, result.out);
+    has(result.out, "timed out after 1s");
+    has(result.out, "exit=0");
+    await waitForPath(s.path("ordinary-child.pid"));
+    descendantPid = Number(s.read("ordinary-child.pid"));
+    await waitForProcessExit(descendantPid);
+    assert(!existsSync(s.path("ordinary-marker.txt")), "ordinary process-group descendant survived cleanup");
+  } finally {
+    if (Number.isInteger(descendantPid) && descendantPid > 0) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    s.cleanup();
+  }
 });
 
 let passed = 0;

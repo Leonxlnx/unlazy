@@ -2,10 +2,10 @@
 // Concurrency and mutation stress tests. Zero dependencies. Node 16+.
 
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
+  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
   symlinkSync, writeFileSync,
 } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,7 @@ function run(script, args, options = {}) {
       encoding: "utf8",
       maxBuffer: 8 * 1024 * 1024,
       env: { ...process.env, ...(options.env || {}) },
+      timeout: options.timeoutMs,
     }, (error, stdout, stderr) => {
       done({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, out: (stdout || "") + (stderr || "") });
     });
@@ -167,6 +168,52 @@ test("atomic writer: predictable pre-created temp links are never followed", asy
     writeAtomic(target, "new\n");
     assert(s.read("victim.txt") === "safe\n", "predictable temp symlink was followed");
     assert(s.read("state.json") === "new\n", "target was not written");
+  } finally { s.cleanup(); }
+});
+
+test("status log: an existing symlink is refused without touching its target", async () => {
+  if (process.platform === "win32") return;
+  const s = sandbox();
+  try {
+    s.write(".unlazy/api/GATES.md", "# Gates\n\n- [ ] G1: pending\n  EVIDENCE: pending\n");
+    s.write("victim.txt", "safe\n");
+    symlinkSync(s.path("victim.txt"), s.path(".unlazy/api/status.log"));
+    const result = await run(GATE_CHECK, ["--scope", "api", "--log", "attacker-controlled append"], { cwd: s.dir });
+    assert(result.code === 2, "symlinked status log should fail closed\n" + result.out);
+    has(result.out, "cannot append status");
+    assert(s.read("victim.txt") === "safe\n", "status append followed the symlink");
+  } finally { s.cleanup(); }
+});
+
+test("status log: an existing hard link is refused without touching its sibling", async () => {
+  const s = sandbox();
+  try {
+    s.write(".unlazy/api/GATES.md", "# Gates\n\n- [ ] G1: pending\n  EVIDENCE: pending\n");
+    s.write("victim.txt", "safe\n");
+    linkSync(s.path("victim.txt"), s.path(".unlazy/api/status.log"));
+    const result = await run(GATE_CHECK, ["--scope", "api", "--log", "attacker-controlled append"], { cwd: s.dir });
+    assert(result.code === 2, "hard-linked status log should fail closed\n" + result.out);
+    has(result.out, "cannot append status");
+    assert(s.read("victim.txt") === "safe\n", "status append followed the hard link");
+  } finally { s.cleanup(); }
+});
+
+test("status log: a FIFO is rejected without blocking the logger", async () => {
+  if (process.platform === "win32") return;
+  const s = sandbox();
+  try {
+    s.write(".unlazy/api/GATES.md", "# Gates\n\n- [ ] G1: pending\n  EVIDENCE: pending\n");
+    const fifo = s.path(".unlazy/api/status.log");
+    const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+    assert(made.status === 0, "could not create FIFO fixture: " + made.stderr);
+    const started = Date.now();
+    const result = await run(GATE_CHECK, ["--scope", "api", "--log", "must not block"], {
+      cwd: s.dir,
+      timeoutMs: 2000,
+    });
+    assert(result.code === 2, "FIFO logger did not fail closed\n" + result.out);
+    assert(Date.now() - started < 1800, "FIFO validation waited for the outer timeout");
+    has(result.out, "cannot append status");
   } finally { s.cleanup(); }
 });
 

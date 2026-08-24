@@ -46,5 +46,6 @@ If a gate becomes genuinely impossible, keep the gate and add:
 ABANDON: G<n> <non-empty reason and handoff>
 ```
 
-Surface every abandonment in the final report. See references/gates.md.
+Surface every abandonment as a non-successful handoff in the final report; an
+abandoned leaf is not complete. See references/gates.md.
 -->

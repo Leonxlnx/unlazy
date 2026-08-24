@@ -90,7 +90,7 @@ Use `--help` for the complete current CLI.
 
 A runnable gate passes only when its process exits `0` and `EXPECT:` matches combined output. Evidence records the resolved shell, resolved working directory, exit status, a short `PATH` fingerprint, and decisive output. The pre-execution transcript shows the resolved `PATH`, capped for display. Old evidence is not re-execution; parent verification uses `--reverify`.
 
-The parser rejects zero-gate ledgers, duplicate ids, incomplete runnable gates, invalid expectations, and abandonment without a reason. It ignores fenced examples, preserves CRLF or LF when updating, and inserts a missing evidence line when needed.
+The parser rejects zero-gate ledgers, duplicate ids, incomplete runnable gates, invalid expectations, and abandonment with a missing reason or unknown gate id. It ignores fenced examples, preserves CRLF or LF when updating, and inserts a missing evidence line when needed. A valid abandonment is terminal handoff rather than success: the checker exits `1` with `HANDOFF REQUIRED`, and Stop allows exit while reporting qualified ids.
 
 The checker can prove only the command oracle you declare. It cannot infer that an English title and arbitrary shell code mean the same thing. Good gates therefore:
 
@@ -100,7 +100,7 @@ The checker can prove only the command oracle you declare. It cannot infer that 
 - measure supplied figures instead of copying them into `EXPECT:`
 - review consequential manual outcomes with evidence proportional to risk
 
-Full specification: [references/gates.md](references/gates.md).
+Use the advisory, non-executing `scripts/gate-lint.mjs` to catch mechanically weak ledger patterns; add `--strict` when warnings should fail. Full specification: [references/gates.md](references/gates.md).
 
 ## Shell and PATH
 
@@ -114,7 +114,7 @@ Parent re-verification should use the same declared shell and required toolchain
 
 Approval records live under `~/.unlazy/approved` by default. `UNLAZY_APPROVAL_DIR` may select another real directory, but it must remain outside the checked repository. Each record is specific to the absolute ledger and gate, exact `CHECK:` and `EXPECT:`, resolved `CWD:` and shell, timeout, output and regex limits, platform, and full inherited `PATH`. Editing any bound input requires approval again.
 
-Approval is consent, not a sandbox. Checks run with ambient filesystem, environment, credential, and network access. Scopes and ownership leases coordinate cooperating processes but do not restrict what a process can read or write. Review [SECURITY.md](SECURITY.md) before running inherited gates or installing the Stop hook.
+Approval is consent, not a sandbox. It does not hash called scripts, fixtures, dependencies, or other transitive inputs, and `--status`/Stop do not revalidate old evidence. Reinspect changed dependencies and run `--reverify`; see [SECURITY.md](SECURITY.md) for the bounded digest pattern when user-designed dependency identity is needed. Checks run with ambient filesystem, environment, credential, and network access. Scopes and ownership leases coordinate cooperating processes but do not restrict what a process can read or write.
 
 ## Orchestration and parallel work
 
@@ -127,7 +127,7 @@ For work that needs fresh contexts, create one scoped pipeline under `.unlazy/<s
 .unlazy/<scope>/gates/node-*.md
 ```
 
-The driver fixes interfaces, dependencies, conventions, and file ownership before dispatch. Leaves use declared `WAITING`, `READY`, `IN-FLIGHT`, `VERIFIED`, or `ABANDONED` states. Branches use `OPEN`, `VERIFIED`, or `ABANDONED`.
+The driver rereads the current request and maintains a revisioned contract inventory that maps each independently required outcome or acceptance-changing constraint to an owner and observation. It fixes interfaces, dependencies, conventions, and file ownership before dispatch. Leaves use declared `WAITING`, `READY`, `IN-FLIGHT`, `VERIFIED`, or `ABANDONED` states. Branches use `OPEN`, `VERIFIED`, or `ABANDONED`.
 
 Ready leaves may run together only after each declares complete, disjoint, repository-relative `OWNS:` paths and claims them:
 
@@ -139,11 +139,13 @@ Lease matching is conservative and may reject a safe-looking pair. It is a coord
 
 Dispatch is rolling: when a verified leaf unblocks another, start the newly ready leaf without waiting for unrelated work. Gate checks remain sequential by default. `--jobs <N>`, where `N` is an integer from 1 through 64, is an opt-in rolling limit for independent checks and keeps reporting in ledger order.
 
-Read [references/method.md](references/method.md), [references/orchestration.md](references/orchestration.md), and [references/parallel.md](references/parallel.md) before parallel fan-out.
+For every independent READY set, open a native launch wave, record each host agent handle, and seal before the first wait. If a partial launch cannot recover, use the audited `abandon --reason` transition; never invent a handle or delete state. Read [references/method.md](references/method.md), [references/orchestration.md](references/orchestration.md), [references/dispatch.md](references/dispatch.md), and [references/parallel.md](references/parallel.md) before parallel fan-out.
+
+`gate-check.mjs --scope <id>` reduces the scope's ledgers and dispatch waves together. It prints `ALL MET` only when every gate is met and every wave is complete; an abandoned wave remains a non-successful `HANDOFF REQUIRED` outcome.
 
 ## Optional Claude Code Stop hook
 
-The hook scans the current session's resolved ledger and returns Claude Code's documented top-level `decision: "block"` response while gates remain unmet. It does not execute checks. Its own session-keyed progress guard releases after six consecutive blocks without ledger progress.
+The hook scans the current session's resolved ledger and dispatch state and returns Claude Code's documented top-level `decision: "block"` response while gates remain unmet or launch waves remain incomplete. It does not execute checks. Its own session-keyed progress guard releases after six consecutive blocks without semantic gate/dispatch progress; metadata-only edits do not reset it. Abandonment stays visible as an explicit bounded handoff in pure, mixed-blocking, and final-release messages, without echoing free-form reasons.
 
 Install only with the user's consent:
 
@@ -166,6 +168,11 @@ The unreleased `2.1.0` source integrates the useful parts of community PRs while
 - `--shell` and `UNLAZY_SHELL`, with pre-execution PATH disclosure and resolved shell, CWD, exit, and output evidence
 - scoped pipelines, session routing, atomic ledger updates, and serialized lease coordination
 - rolling orchestration and opt-in `--jobs`, sequential by default
+- native dispatch launch waves with auditable partial-launch abandonment
+- revisioned PLAN contract inventories and final request reconciliation
+- advisory gate linting with opt-in strict failure
+- non-successful gate abandonment that cannot promote parent completion
+- bounded Windows timeout process-tree cleanup with a live nested-descendant CI regression
 - session-keyed Stop-hook state and atomic settings updates with a backup
 - Node 16 support, zero runtime dependencies, a package test command, and CI
 - accurate security, portability, research, and reproducibility documentation
@@ -181,11 +188,12 @@ agents/openai.yaml               skill UI metadata
 references/gates.md              strict format, approval, shell, and authoring rules
 references/method.md             Depth Tree decomposition method
 references/orchestration.md      states, rolling dispatch, and verification hierarchy
+references/dispatch.md           native launch waves, host adapters, and recovery
 references/parallel.md           scope and lease coordination limits
 references/token-economy.md      attention and verification cost discipline
 research/validation-protocol.md  historical limitations and rerun protocol
 templates/                       plan, leaf, and branch ledger templates
-scripts/                         checker, shared parser, installer, and Stop hook
+scripts/                         checker, linter, dispatch recorder, installer, and Stop hook
 tests/                           deterministic behavior and regression tests
 ```
 
