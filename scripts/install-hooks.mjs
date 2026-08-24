@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Install or remove unlazy's Claude Code Stop hook. Zero dependencies. Node 16+.
 
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import {
+  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync,
+  openSync, readFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -48,6 +51,7 @@ if (scope) {
 }
 
 const script = fileURLToPath(new URL("./stop-hook.mjs", import.meta.url));
+const MANAGED_MARKER = "--unlazy-hook-v2";
 const target = global
   ? join(homedir(), ".claude", "settings.json")
   : join(process.cwd(), ".claude", shared ? "settings.json" : "settings.local.json");
@@ -57,14 +61,29 @@ const isObject = (value) => value !== null && typeof value === "object" && !Arra
 let raw = "";
 let settings = {};
 if (existsSync(target)) {
+  let fd = null;
   try {
-    const info = lstatSync(target);
-    if (info.isSymbolicLink() || !info.isFile()) throw new Error("target must be a regular file, not a link or directory");
-    raw = readFileSync(target, "utf8");
+    const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW || 0);
+    fd = openSync(target, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0) | noFollow);
+    const opened = fstatSync(fd);
+    const named = lstatSync(target);
+    if (!opened.isFile() || !named.isFile() || named.isSymbolicLink() ||
+        opened.nlink !== 1 || named.nlink !== 1 ||
+        opened.dev !== named.dev || opened.ino !== named.ino) {
+      throw new Error("target must be one unchanged regular file, not a link or directory");
+    }
+    raw = readFileSync(fd, "utf8");
+    const after = lstatSync(target);
+    if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 ||
+        after.dev !== opened.dev || after.ino !== opened.ino) {
+      throw new Error("target changed while it was read");
+    }
     settings = JSON.parse(raw);
   } catch (error) {
     console.error("Refusing to touch " + target + ": " + error.message);
     process.exit(1);
+  } finally {
+    if (fd !== null) try { closeSync(fd); } catch { /* ignore */ }
   }
 }
 
@@ -96,12 +115,35 @@ const quote = (value) => {
   if (process.platform === "win32") return '"' + String(value).replace(/"/g, '""') + '"';
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 };
-const command = quote(process.execPath) + " " + quote(script) + " --unlazy" + (scope ? " --scope " + scope : "");
+const command = quote(process.execPath) + " " + quote(script) + " " + MANAGED_MARKER +
+  (scope ? " --scope " + scope : "");
 
 const isOurHandler = (handler) => {
   if (!isObject(handler) || typeof handler.command !== "string") return false;
   const value = handler.command;
-  return value.includes("stop-hook.mjs") && (value.includes("--unlazy") || value.includes(script) || /[\\/]unlazy[\\/]/i.test(value));
+  const token = (name) => new RegExp("(?:^|\\s)" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=\\s|$)").test(value);
+  // An exact foreign --unlazy-* option is positive evidence that this is not
+  // our legacy entry, even when it happens to invoke the same script path.
+  const foreignUnlazyOption = value.split(/\s+/).some((part) => {
+    const quoted = part.length >= 2 &&
+      ((part[0] === '"' && part[part.length - 1] === '"') ||
+       (part[0] === "'" && part[part.length - 1] === "'"));
+    const option = quoted ? part.slice(1, -1) : part;
+    return option.startsWith("--unlazy-") && option !== MANAGED_MARKER;
+  });
+  if (foreignUnlazyOption) return false;
+  if (token(MANAGED_MARKER)) return true;
+  // Migrate v2.0/v2.1 handlers only when both the exact old marker and the
+  // packaged scripts/stop-hook.mjs shape are present. Substrings such as
+  // --unlazy-helper and unrelated same-named scripts are never ownership.
+  const packagedStopHook = /(?:^|[\s"'])[^\s"']*[\\/]scripts[\\/]stop-hook\.mjs(?=$|[\s"'])/i.test(value);
+  const namedLegacyInstall = /[\\/]unlazy[\\/]scripts[\\/]stop-hook\.mjs(?=$|[\s"'])/i.test(value);
+  // Upstream v2.0 shipped before any marker and is recognizable only at its
+  // conventional Claude skill location. Keep that narrow compatibility path,
+  // while marker-era moved installs require the exact standalone old token.
+  const conventionalV2Path = /[\\/]\.claude[\\/]skills[\\/]unlazy[\\/]scripts[\\/]stop-hook\.mjs(?=$|[\s"'])/i.test(value);
+  return value.includes(script) || conventionalV2Path ||
+    (token("--unlazy") && (namedLegacyInstall || packagedStopHook));
 };
 
 const originalGroups = (settings.hooks && settings.hooks.Stop) || [];

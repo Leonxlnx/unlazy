@@ -2,10 +2,10 @@
 // Security, parser, execution, and writeback regressions. Zero dependencies.
 
 import {
-  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
-  writeFileSync,
+  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
+  readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { delimiter, dirname, join, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -161,6 +161,65 @@ test("approval: storage failures use the infrastructure exit code", async () => 
   } finally { s.cleanup(); }
 });
 
+test("approval: a lexical outside alias cannot resolve back into the repository", async () => {
+  const s = sandbox();
+  try {
+    s.write("marker.mjs", "import { writeFileSync } from 'node:fs'; writeFileSync('ran.txt','yes'); console.log('OK');\n");
+    s.write("GATES.md", gate("G1", "canonical approval boundary", "node marker.mjs", "OK"));
+    const approved = await gateRun(s, []);
+    assert(approved.code === 0, approved.out);
+
+    const inside = s.path("repo-controlled-approvals");
+    renameSync(s.approvals, inside);
+    symlinkSync(inside, s.approvals, process.platform === "win32" ? "junction" : "dir");
+    rmSync(s.path("ran.txt"), { force: true });
+    s.write("GATES.md", gate("G1", "canonical approval boundary", "node marker.mjs", "OK"));
+
+    const replay = await gateRun(s, [], { approve: false });
+    assert(replay.code === 2, "aliased approval store returned " + replay.code + "\n" + replay.out);
+    has(replay.out, "could not validate approval");
+    assert(!existsSync(s.path("ran.txt")), "a repo-controlled approval alias authorized CHECK execution");
+  } finally { s.cleanup(); }
+});
+
+test("approval: an existing store must remain private to its owner", async () => {
+  if (process.platform === "win32") return;
+  const s = sandbox();
+  try {
+    s.write("ok.mjs", "console.log('OK');\n");
+    s.write("GATES.md", gate("G1", "private approval store", "node ok.mjs", "OK"));
+    chmodSync(s.approvals, 0o755);
+    const result = await gateRun(s, [], { approve: false });
+    assert(result.code === 2, result.out);
+    has(result.out, "must not grant group or other permissions");
+  } finally { s.cleanup(); }
+});
+
+test("approval: a FIFO record is rejected without blocking or executing", async () => {
+  if (process.platform === "win32") return;
+  const s = sandbox();
+  try {
+    s.write("marker.mjs", "import { writeFileSync } from 'node:fs'; writeFileSync('ran.txt','yes'); console.log('OK');\n");
+    s.write("GATES.md", gate("G1", "regular approval record", "node marker.mjs", "OK"));
+    const first = await gateRun(s, []);
+    assert(first.code === 0, first.out);
+    const token = readdirSync(s.approvals).find((name) => name.endsWith(".json"));
+    assert(token, "approval token was not created");
+    rmSync(join(s.approvals, token));
+    const made = spawnSync("mkfifo", [join(s.approvals, token)], { encoding: "utf8" });
+    assert(made.status === 0, "could not create FIFO fixture: " + made.stderr);
+    rmSync(s.path("ran.txt"), { force: true });
+    s.write("GATES.md", gate("G1", "regular approval record", "node marker.mjs", "OK"));
+
+    const started = Date.now();
+    const replay = await gateRun(s, [], { approve: false });
+    assert(replay.code === 2, replay.out);
+    assert(Date.now() - started < 1800, "FIFO approval record blocked");
+    has(replay.out, "could not validate approval");
+    assert(!existsSync(s.path("ran.txt")), "FIFO record authorized CHECK execution");
+  } finally { s.cleanup(); }
+});
+
 test("shell: resolution and PATH context are visible, invalid overrides are usage errors", async () => {
   const s = sandbox();
   try {
@@ -206,6 +265,40 @@ test("execution: failure summaries retain early assertion diagnostics", async ()
     assert(result.code === 1, result.out);
     has(result.out, "AssertionError: expected 3 but received 4");
     has(result.out, "trailer-19");
+  } finally { s.cleanup(); }
+});
+
+test("evidence: successful output is fingerprinted instead of persisted or echoed", async () => {
+  const s = sandbox();
+  const sentinel = "token-shaped-private-value-7f13b9";
+  try {
+    s.write("private.mjs", "console.log('" + sentinel + "'); console.log('CHECK_OK');\n");
+    s.write("GATES.md", gate("G1", "private output", "node private.mjs", "CHECK_OK"));
+    const result = await gateRun(s, []);
+    assert(result.code === 0, result.out);
+    lacks(result.out, sentinel, "success transcript");
+    has(result.out, "output=sha256=");
+    const ledger = s.read("GATES.md");
+    lacks(ledger, sentinel, "persisted evidence");
+    has(ledger, "EXPECT=matched; output-sha256=");
+    has(ledger, "; output-bytes=");
+  } finally { s.cleanup(); }
+});
+
+test("terminal: repository titles and diagnostics cannot emit controls or bidi overrides", async () => {
+  const s = sandbox();
+  try {
+    s.write("GATES.md", "- [ ] G1: title\u001b]0;owned\u0007\u202eevil\n  EVIDENCE: pending\n");
+    const status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 1, status.out);
+    assert(!/[\u001b\u0007\u202e]/.test(status.out), "terminal controls survived status output");
+
+    s.write("bad.mjs", "console.error('failure\\u001b[31m red\\u001b[0m'); process.exitCode=1;\n");
+    s.write("GATES.md", gate("G2", "controlled failure", "node bad.mjs", "NEVER"));
+    const failed = await gateRun(s, []);
+    assert(failed.code === 1, failed.out);
+    assert(!failed.out.includes("\u001b"), "terminal escape survived failure output");
+    has(failed.out, "failure [31m red [0m");
   } finally { s.cleanup(); }
 });
 
@@ -320,6 +413,23 @@ test("regex: a decisive regex succeeds and catastrophic matching is bounded", as
   } finally { s.cleanup(); }
 });
 
+test("regex: worker startup is outside the match budget and concurrency is capped", async () => {
+  const s = sandbox();
+  try {
+    s.write("simple.mjs", "console.log('total: 42 items');\n");
+    let ledger = "";
+    for (let index = 1; index <= 32; index++) {
+      ledger += gate("G" + index, "simple regex " + index, "node simple.mjs", "/total: \\d+ items/");
+    }
+    s.write("GATES.md", ledger);
+    const result = await gateRun(s, ["--jobs", "32", "--timeout", "10"]);
+    assert(result.code === 0, result.out);
+    lacks(result.out, "worker startup exceeded");
+    lacks(result.out, "EXPECT regex exceeded");
+    has(result.out, "PASS GATES:G32");
+  } finally { s.cleanup(); }
+});
+
 test("execution: output is capped and overflow cannot certify a gate", async () => {
   const s = sandbox();
   try {
@@ -362,7 +472,10 @@ test("jobs: runner waits for stdio close so delayed descendant output is visible
     s.write("GATES.md", gate("G1", "late output", "node delayed.mjs", "LATE_OK"));
     const result = await gateRun(s, []);
     assert(result.code === 0, result.out);
-    has(result.out, "output=LATE_OK");
+    has(result.out, "PASS GATES:G1");
+    has(result.out, "output=sha256=");
+    // EXPECT is printed during approval; the successful process output itself
+    // is represented only by the fingerprint above.
   } finally { s.cleanup(); }
 });
 
@@ -414,6 +527,17 @@ test("CLI: numeric bounds, incompatible modes, and file types fail with exit 2",
       const result = await gateRun(s, args, { approve: false });
       assert(result.code === 2, args.join(" ") + " expected 2, got " + result.code + "\n" + result.out);
     }
+  } finally { s.cleanup(); }
+});
+
+test("CLI: trusted help layout remains multiline", async () => {
+  const s = sandbox();
+  try {
+    const result = await gateRun(s, ["--help"], { approve: false });
+    assert(result.code === 0, result.out);
+    has(result.out, "usage: gate-check.mjs [options] [file ...]\n\nrun modes:\n");
+    has(result.out, "\npipeline actions:\n");
+    assert(result.out.trimEnd().split("\n").length > 20, "help output was flattened\n" + result.out);
   } finally { s.cleanup(); }
 });
 
@@ -647,7 +771,7 @@ test("cleanup: an already-exited child is never signalled through a reusable PID
   assert(!spawned && !killed, "an exited child PID was reused for cleanup");
 });
 
-test("posix cleanup: an exited leader does not suppress its live process group", async () => {
+test("posix cleanup: an exited supervisor never targets a reusable process group", async () => {
   let group = null;
   let direct = false;
   const child = { pid: 4747, exitCode: 0, signalCode: null, kill() { direct = true; return true; } };
@@ -656,8 +780,8 @@ test("posix cleanup: an exited leader does not suppress its live process group",
     killGroup(pid, signal) { group = { pid, signal }; },
   });
   assert(result.ok && !result.fallback, JSON.stringify(result));
-  assert(group.pid === -4747 && group.signal === "SIGKILL", JSON.stringify(group));
-  assert(!direct, "exited leader was signalled directly");
+  assert(result.diagnostic === "process supervisor already exited", JSON.stringify(result));
+  assert(group === null && !direct, "an exited supervisor's reusable PID/PGID was signalled");
 });
 
 test("win32 integration: a timed-out shell and nested descendant are both reaped", async () => {
@@ -747,7 +871,7 @@ test("posix integration: an exited shell leader still has its ordinary descendan
     const result = await gateRun(s, ["--timeout", "1"]);
     assert(result.code === 1, result.out);
     has(result.out, "timed out after 1s");
-    has(result.out, "exit=0");
+    has(result.out, "signal=SIGKILL");
     await waitForPath(s.path("ordinary-child.pid"));
     descendantPid = Number(s.read("ordinary-child.pid"));
     await waitForProcessExit(descendantPid);

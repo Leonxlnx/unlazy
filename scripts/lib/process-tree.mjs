@@ -47,17 +47,22 @@ export function terminateProcessTree(child, options = {}) {
   }
 
   if (platform !== "win32") {
+    // The gate runner launches a detached Node supervisor as the group leader
+    // and keeps it alive until the shell and inherited stdout/stderr close. If
+    // Node has already observed that supervisor exit, the numeric PGID no
+    // longer carries identity and may have been reused; never signal it.
+    if (childExited(child)) {
+      return { ok: true, fallback: false, diagnostic: "process supervisor already exited" };
+    }
     try {
       killGroup(-pid, "SIGKILL");
       return { ok: true, fallback: false, diagnostic: null };
     } catch (error) {
-      // The group id can remain live after its leader exits. Only suppress the
-      // direct PID fallback once the group request itself has failed.
       if (childExited(child)) {
         return {
           ok: true,
           fallback: true,
-          diagnostic: "process-group kill failed (" + (error.code || error.message) + "); child already exited",
+          diagnostic: "process-group kill failed (" + (error.code || error.message) + "); supervisor already exited",
         };
       }
       try {

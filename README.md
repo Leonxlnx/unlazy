@@ -88,7 +88,7 @@ Use `--help` for the complete current CLI.
   EVIDENCE: pending
 ```
 
-A runnable gate passes only when its process exits `0` and `EXPECT:` matches combined output. Evidence records the resolved shell, resolved working directory, exit status, a short `PATH` fingerprint, and decisive output. The pre-execution transcript shows the resolved `PATH`, capped for display. Old evidence is not re-execution; parent verification uses `--reverify`.
+A runnable gate passes only when its process exits `0` and `EXPECT:` matches combined output. Evidence records the resolved shell, resolved working directory, exit status, a short `PATH` fingerprint, the match result, and a SHA-256/byte-count fingerprint of successful output. Raw successful output is neither echoed nor persisted. The pre-execution transcript shows the resolved `PATH`, capped for display. Old evidence is not re-execution; parent verification uses `--reverify`.
 
 The parser rejects zero-gate ledgers, duplicate ids, incomplete runnable gates, invalid expectations, and abandonment with a missing reason or unknown gate id. It ignores fenced examples, preserves CRLF or LF when updating, and inserts a missing evidence line when needed. A valid abandonment is terminal handoff rather than success: the checker exits `1` with `HANDOFF REQUIRED`, and Stop allows exit while reporting qualified ids.
 
@@ -112,9 +112,9 @@ Parent re-verification should use the same declared shell and required toolchain
 
 ## Security boundary
 
-Approval records live under `~/.unlazy/approved` by default. `UNLAZY_APPROVAL_DIR` may select another real directory, but it must remain outside the checked repository. Each record is specific to the absolute ledger and gate, exact `CHECK:` and `EXPECT:`, resolved `CWD:` and shell, timeout, output and regex limits, platform, and full inherited `PATH`. Editing any bound input requires approval again.
+Approval records live under `~/.unlazy/approved` by default. `UNLAZY_APPROVAL_DIR` may select another owner-private real directory, but its canonical target must remain outside the checked repository. Symlinked stores and linked, replaced, or non-private records fail closed. Each record is specific to the absolute ledger and gate, exact `CHECK:` and `EXPECT:`, resolved `CWD:` and shell, timeout, output and regex limits, regex worker limits, platform, and full inherited `PATH`. Editing any bound input requires approval again.
 
-Approval is consent, not a sandbox. It does not hash called scripts, fixtures, dependencies, or other transitive inputs, and `--status`/Stop do not revalidate old evidence. Reinspect changed dependencies and run `--reverify`; see [SECURITY.md](SECURITY.md) for the bounded digest pattern when user-designed dependency identity is needed. Checks run with ambient filesystem, environment, credential, and network access. Scopes and ownership leases coordinate cooperating processes but do not restrict what a process can read or write.
+Approval is consent, not a sandbox. Approval storage is a canonical, owner-private directory outside the repository; records are accepted only as single-link private regular files. Approval does not hash called scripts, fixtures, dependencies, or other transitive inputs, and `--status`/Stop do not revalidate old evidence. Reinspect changed dependencies and run `--reverify`; see [SECURITY.md](SECURITY.md) for the bounded digest pattern when user-designed dependency identity is needed. Checks run with ambient filesystem, environment, credential, and network access. Scopes and ownership leases coordinate cooperating processes but do not restrict what a process can read or write.
 
 ## Orchestration and parallel work
 
@@ -165,7 +165,7 @@ The unreleased `2.1.0` source integrates the useful parts of community PRs while
 
 - strict shared ledger parsing and explicit named-file targeting
 - `--reverify`, explicit `--approve`, and fail-closed exit-plus-EXPECT success
-- `--shell` and `UNLAZY_SHELL`, with pre-execution PATH disclosure and resolved shell, CWD, exit, and output evidence
+- `--shell` and `UNLAZY_SHELL`, with pre-execution PATH disclosure and resolved shell, CWD, exit, match, and successful-output fingerprint evidence
 - scoped pipelines, session routing, atomic ledger updates, and serialized lease coordination
 - rolling orchestration and opt-in `--jobs`, sequential by default
 - native dispatch launch waves with auditable partial-launch abandonment

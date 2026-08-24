@@ -8,8 +8,8 @@ import {
 
 const SCHEMA = 1;
 const STATES = new Set(["open", "sealed", "complete", "abandoned"]);
-const CONTROL = /[\u0000-\u001f\u007f]/;
-const CONTROL_GLOBAL = /[\u0000-\u001f\u007f]/g;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const CONTROL_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 const record = (value = {}) => Object.assign(Object.create(null), value);
 const emptyState = () => ({ schema: SCHEMA, waves: record() });

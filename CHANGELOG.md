@@ -15,7 +15,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Ignore fenced examples, preserve CRLF or LF during updates, and insert a missing evidence line into an otherwise valid gate.
 - Match CommonMark fence length, marker, indentation, and closing-line rules so nested shorter fences cannot expose example gates.
 - Add `--reverify` so parent verification executes already checked runnable gates and removes completion when the oracle no longer passes.
-- Require both process exit `0` and `EXPECT:` match. Include resolved shell, resolved working directory, exit status, and decisive output in evidence and diagnostics.
+- Require both process exit `0` and `EXPECT:` match. Include resolved shell, resolved working directory, exit status, match state, and a SHA-256/byte-count output fingerprint in persisted evidence; keep bounded raw diagnostics terminal-only on failure.
 - Discard an in-flight result when the gate's bound oracle changes before writeback.
 - Diagnose an indented `ABANDON:` instead of ignoring it. Attributes must be indented and `ABANDON:` must not be, so the natural formatting mistake previously left a gate unmet and the honest exit unexplained.
 - Warn when a slash-wrapped `EXPECT:` containing an unescaped inner slash is read as a regular expression. A literal path silently became a pattern whose dots matched any character, and the wrapping slashes leave no way to express the literal.
@@ -23,13 +23,16 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Include scoped dispatch state in the primary gate reduction, so open, sealed, or abandoned waves can never coexist with `ALL MET`. Reject fabricated terminal histories, non-string handles/reasons, missing lifecycle timestamps, and impossible timestamp order.
 - Sanitize repository-controlled dispatch diagnostics before they reach a host hook message, retain qualified abandonment handoffs in mixed block/release outcomes, and discard malformed per-session hook entries instead of failing open.
 - Refuse status-log symlinks and swapped/non-regular targets before appending, including automatic dispatch audit events.
+- Strip terminal controls and bidirectional overrides from repository-controlled checker diagnostics.
+- Separate regular-expression worker startup from the 250ms match budget and cap concurrent match workers at four, so high `--jobs` values remain fail-closed without startup-induced false failures.
 
 ### Command trust and portability
 
-- Add explicit `--approve` execution consent for ledger commands. Store approvals under `~/.unlazy/approved` by default, require any override to remain outside the repository, and bind each approval to the absolute ledger and gate, command, expectation, resolved working directory and shell, timeout, output and regex limits, platform, and inherited `PATH`.
+- Add explicit `--approve` execution consent for ledger commands. Store approvals under `~/.unlazy/approved` by default, require the canonical owner-private store to remain outside the repository, reject linked/replaced/non-private records, and bind each approval to the absolute ledger and gate, command, expectation, resolved working directory and shell, timeout, output and regex limits, regex worker limits, platform, and inherited `PATH`.
 - Add `--shell` with `UNLAZY_SHELL` fallback. Keep the platform shell as the final default and make inherited `PATH` behavior visible.
 - Replace POSIX-only gate examples with repository-owned Node scripts and document Windows shell and PATH variance.
 - On Windows timeouts, terminate an active `cmd.exe` tree with the drive-root `<drive>:\Windows\System32\taskkill.exe` only when `SystemRoot`, `WINDIR`, and `SystemDrive` agree. Bound the helper itself to one second, inspect every result, and fall back to the direct child without PATH lookup. Skip numeric-PID cleanup when Node has already observed leader exit, and independently settle after cleanup even when descendants retain pipes. The Windows CI path launches and reaps a real shell plus nested Node descendant.
+- Keep a detached Node supervisor alive until each shell and inherited output stream closes. POSIX cleanup signals the group only while that exact supervisor still owns its PID/PGID, preventing a reused numeric group from being targeted without regressing descendant cleanup.
 - Add [SECURITY.md](SECURITY.md) for command, environment, installer, hook, evidence, scope, and lease boundaries.
 - Clarify that approval binds declared oracle text/environment, not called scripts or other transitive files, while `--status` and Stop report historical evidence until explicit `--reverify`.
 
@@ -51,7 +54,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 
 ### Installer, package, and documentation
 
-- Identify installed hooks by a stable marker and actual script path so moved installations are repaired and uninstall removes only unlazy handlers.
+- Identify installed hooks by an exact stable marker and constrained legacy script path so moved installations are repaired without claiming unrelated marker substrings. Verify an existing settings file through a no-follow descriptor before reading or backing it up.
 - Validate settings container shapes, preserve unrelated entries, write atomically, and create `<settings-file>.unlazy.bak` before replacing an existing settings file.
 - Repair matching hook commands whose managed type or timeout fields drifted, and return the documented infrastructure exit code when approval storage fails.
 - Warn that local settings and `.unlazy/` should remain untracked and that `--shared` embeds a machine-specific absolute path.

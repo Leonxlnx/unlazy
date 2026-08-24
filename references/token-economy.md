@@ -5,7 +5,7 @@ Spend model attention on implementation and judgment. Move repeated, determinist
 ## Keep enforcement cheap
 
 - **Use runnable checks.** External command execution does not itself require model inference. The agent still spends context on the command, returned output, failure interpretation, and evidence review.
-- **Cap evidence.** Store the resolved environment facts and decisive output, not a full build log.
+- **Cap evidence.** Store resolved environment facts plus the automatic output fingerprint, never raw successful output or a full build log.
 - **Keep the Stop hook scan-only.** The hook itself does not call a model. A block causes another agent continuation, which does consume model work, so keep the six-block no-progress guard and make each block actionable.
 - **Use sequential checks by default.** Raise `--jobs` only for independent checks when wall-clock savings justify harder failure diagnosis.
 
@@ -14,7 +14,7 @@ Spend model attention on implementation and judgment. Move repeated, determinist
 - Give a leaf the shared contract and its own ledger, not the driver's transcript or unrelated leaf outputs.
 - Keep `SKILL.md` limited to the core workflow. Load method, gate, orchestration, and parallel references only when the selected mode needs them.
 - Append events to `status.log`. Do not repeatedly regenerate a large plan when one line records the event.
-- Summarize a long command result into decisive evidence while retaining the full log outside the prompt when debugging needs it.
+- Keep failure logs local and summarize only non-sensitive decisive facts when a manual report needs them; automatic success evidence already contains a digest and byte count.
 
 ## Spend stronger reasoning on leverage points
 

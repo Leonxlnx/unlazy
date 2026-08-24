@@ -3,18 +3,20 @@
 // Zero dependencies. Node 16+.
 
 import {
-  closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync,
-  statSync, unlinkSync, writeFileSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync,
+  mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { randomBytes } from "node:crypto";
 import { delimiter, dirname, basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
   UNLAZY_DIR, appendStatus, claimLeases, formatDocument, gateState,
   hookStatePath, listScopes, parseGates, qualify, releaseLeases, resolveTarget,
-  scopeRoot, sha256, sleep, tail, validateScopeId, withFileLock, writeAtomic,
+  scopeRoot, sha256, sleep, validateScopeId, withFileLock, writeAtomic,
 } from "./lib/gates.mjs";
 import { terminateProcessTree } from "./lib/process-tree.mjs";
 import { dispatchStatus } from "./lib/dispatch.mjs";
@@ -59,8 +61,23 @@ const VALUE_OPTIONS = new Set([
   "--log", "--bind", "--shell",
 ]);
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const MAX_APPROVAL_BYTES = 256 * 1024;
 const REGEX_TIMEOUT_MS = 250;
+const REGEX_STARTUP_TIMEOUT_MS = 5000;
+const MAX_REGEX_WORKERS = 4;
 const DEFAULT_TIMEOUT_SECONDS = 120;
+const CHECK_SUPERVISOR = fileURLToPath(new URL("./lib/check-supervisor.mjs", import.meta.url));
+
+// Repository-controlled titles, paths, commands, and output must not be able
+// to rewrite terminal history, set a window title, or visually reorder text.
+// Strip every C0/C1 control plus Unicode bidi formatting markers at the final
+// sink. Each console call still receives its own trailing newline.
+const UNSAFE_TERMINAL_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const terminalSafe = (value) => String(value).replace(UNSAFE_TERMINAL_RE, " ");
+for (const method of ["log", "error"]) {
+  const write = console[method].bind(console);
+  console[method] = (...values) => write(...values.map(terminalSafe));
+}
 
 function parseArgs(argv) {
   const options = {};
@@ -129,7 +146,9 @@ const parsedArgs = parseArgs(process.argv.slice(2));
 if (parsedArgs.error) failUsage(parsedArgs.error);
 const { options: opt, files: fileArgs } = parsedArgs;
 if (opt.help || opt.h) {
-  console.log(HELP);
+  // HELP is a fixed local constant, so preserve its intentional layout instead
+  // of routing it through the untrusted-value terminal sanitizer.
+  process.stdout.write(HELP + "\n");
   process.exit(0);
 }
 
@@ -158,7 +177,9 @@ if (!action && !opt.status) asDirectory(defaultCwd, "--cwd");
 
 if (action === "--list-scopes") {
   const scopes = listScopes(root);
-  console.log(scopes.length ? scopes.join("\n") : "(no pipelines under " + UNLAZY_DIR + "/)");
+  if (scopes.length) {
+    for (const scope of scopes) console.log(scope);
+  } else console.log("(no pipelines under " + UNLAZY_DIR + "/)");
   process.exit(0);
 }
 
@@ -322,6 +343,8 @@ function oracle(file, gate) {
     timeoutMs: timeoutSeconds * 1000,
     maxOutputBytes: MAX_OUTPUT_BYTES,
     regexTimeoutMs: REGEX_TIMEOUT_MS,
+    regexStartupTimeoutMs: REGEX_STARTUP_TIMEOUT_MS,
+    maxRegexWorkers: MAX_REGEX_WORKERS,
     platform: process.platform,
     path: pathValue,
   };
@@ -337,30 +360,97 @@ function pathIsInside(parent, child) {
 }
 
 const approvalDir = resolve(process.env.UNLAZY_APPROVAL_DIR || join(homedir(), ".unlazy", "approved"));
+const canonicalRoot = realpathSync(root);
 if (!opt.status && pathIsInside(root, approvalDir)) failUsage("UNLAZY_APPROVAL_DIR must be outside the repository root");
 
-function approvalPath(file, gate) {
+function approvalPath(file, gate, directory = approvalDir) {
   const identity = resolve(file) + "\0" + gate.id + "\0" + signature(file, gate);
-  return join(approvalDir, sha256(identity) + ".json");
+  return join(directory, sha256(identity) + ".json");
+}
+
+function assertPrivateApprovalEntry(path, info, kind) {
+  if (info.isSymbolicLink() || (kind === "directory" ? !info.isDirectory() : !info.isFile())) {
+    throw new Error(path + " must be a real " + kind);
+  }
+  const uid = typeof process.geteuid === "function" ? process.geteuid()
+    : typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid !== null && info.uid !== uid) {
+    throw new Error(path + " must be owned by the current user");
+  }
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+    throw new Error(path + " must not grant group or other permissions");
+  }
+}
+
+function validatedApprovalDir({ create = false } = {}) {
+  if (create) mkdirSync(approvalDir, { recursive: true, mode: 0o700 });
+  else if (!existsSync(approvalDir)) return null;
+  const info = lstatSync(approvalDir);
+  assertPrivateApprovalEntry(approvalDir, info, "directory");
+  const canonical = realpathSync(approvalDir);
+  if (pathIsInside(canonicalRoot, canonical)) {
+    throw new Error("approval directory resolves inside the repository root: " + canonical);
+  }
+  const canonicalInfo = lstatSync(canonical);
+  assertPrivateApprovalEntry(canonical, canonicalInfo, "directory");
+  return { path: canonical, dev: canonicalInfo.dev, ino: canonicalInfo.ino };
+}
+
+function assertApprovalDirUnchanged(store) {
+  const current = lstatSync(store.path);
+  assertPrivateApprovalEntry(store.path, current, "directory");
+  if (current.dev !== store.dev || current.ino !== store.ino) {
+    throw new Error("approval directory changed during use: " + store.path);
+  }
+}
+
+function readApprovalFile(path) {
+  let fd = null;
+  try {
+    const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW || 0);
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0) | noFollow);
+    const opened = fstatSync(fd);
+    const named = lstatSync(path);
+    assertPrivateApprovalEntry(path, opened, "file");
+    if (opened.size > MAX_APPROVAL_BYTES) {
+      throw new Error("approval record exceeds " + MAX_APPROVAL_BYTES + " bytes: " + path);
+    }
+    if (named.isSymbolicLink() || !named.isFile() || named.nlink !== 1 || opened.nlink !== 1 ||
+        named.dev !== opened.dev || named.ino !== opened.ino) {
+      throw new Error("refusing linked or replaced approval record " + path);
+    }
+    const text = readFileSync(fd, "utf8");
+    const after = lstatSync(path);
+    if (after.isSymbolicLink() || !after.isFile() || after.nlink !== 1 ||
+        after.dev !== opened.dev || after.ino !== opened.ino) {
+      throw new Error("approval record changed while it was read: " + path);
+    }
+    return text;
+  } finally {
+    if (fd !== null) try { closeSync(fd); } catch { /* ignore */ }
+  }
 }
 
 function approvalExists(file, gate) {
-  const path = approvalPath(file, gate);
-  try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
-    return value && value.file === resolve(file) && value.gate === gate.id && value.signature === signature(file, gate);
-  } catch { return false; }
-}
-
-function ensureApprovalDir() {
-  mkdirSync(approvalDir, { recursive: true, mode: 0o700 });
-  const info = lstatSync(approvalDir);
-  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(approvalDir + " must be a real directory");
+  const store = validatedApprovalDir();
+  if (!store) return false;
+  const path = approvalPath(file, gate, store.path);
+  let text;
+  try { text = readApprovalFile(path); }
+  catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+  let value;
+  try { value = JSON.parse(text); }
+  catch { return false; }
+  assertApprovalDirUnchanged(store);
+  return value && value.file === resolve(file) && value.gate === gate.id && value.signature === signature(file, gate);
 }
 
 async function recordApproval(file, gate) {
-  ensureApprovalDir();
-  const token = approvalPath(file, gate);
+  const store = validatedApprovalDir({ create: true });
+  const token = approvalPath(file, gate, store.path);
   const lock = token + ".lock";
   const deadline = Date.now() + 10000;
   const owner = randomBytes(16).toString("hex");
@@ -386,6 +476,7 @@ async function recordApproval(file, gate) {
       oracle: oracle(file, gate), approvedAt: new Date().toISOString(),
     };
     writeAtomic(token, JSON.stringify(value, null, 2) + "\n");
+    assertApprovalDirUnchanged(store);
   } finally {
     try { closeSync(fd); } catch { /* ignore */ }
     try {
@@ -405,24 +496,71 @@ function printOracle(file, gate, prefix) {
   console.log("    PATH: " + pathTranscript);
 }
 
-function safeRegexMatch(expectation, output) {
-  if (expectation.kind === "text") return Promise.resolve({ matched: output.includes(expectation.value) });
-  return new Promise((done) => {
-    const worker = new Worker(new URL("./lib/regex-worker.mjs", import.meta.url));
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      worker.terminate().catch(() => {});
-      done(value);
-    };
-    const timer = setTimeout(() => finish({ matched: false, error: "EXPECT regex exceeded " + REGEX_TIMEOUT_MS + "ms" }), REGEX_TIMEOUT_MS);
-    worker.once("message", (message) => finish(message));
-    worker.once("error", (error) => finish({ matched: false, error: error.message }));
-    worker.once("exit", (code) => { if (code !== 0) finish({ matched: false, error: "EXPECT worker exited " + code }); });
-    worker.postMessage({ source: expectation.source, flags: expectation.flags, output });
-  });
+let activeRegexWorkers = 0;
+const regexWaiters = [];
+
+function acquireRegexWorker() {
+  if (activeRegexWorkers < MAX_REGEX_WORKERS) {
+    activeRegexWorkers++;
+    return Promise.resolve();
+  }
+  return new Promise((done) => regexWaiters.push(done));
+}
+
+function releaseRegexWorker() {
+  const next = regexWaiters.shift();
+  if (next) next();
+  else activeRegexWorkers--;
+}
+
+async function safeRegexMatch(expectation, output) {
+  if (expectation.kind === "text") return { matched: output.includes(expectation.value) };
+  await acquireRegexWorker();
+  try {
+    return await new Promise((done) => {
+      let worker;
+      let settled = false;
+      let startupTimer = null;
+      let matchTimer = null;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        if (startupTimer) clearTimeout(startupTimer);
+        if (matchTimer) clearTimeout(matchTimer);
+        if (worker) worker.terminate().catch(() => {});
+        done(value);
+      };
+      try { worker = new Worker(new URL("./lib/regex-worker.mjs", import.meta.url)); }
+      catch (error) {
+        finish({ matched: false, error: "EXPECT worker could not start: " + error.message });
+        return;
+      }
+      startupTimer = setTimeout(() => finish({
+        matched: false,
+        error: "EXPECT worker startup exceeded " + REGEX_STARTUP_TIMEOUT_MS + "ms",
+      }), REGEX_STARTUP_TIMEOUT_MS);
+      worker.once("online", () => {
+        if (settled) return;
+        clearTimeout(startupTimer);
+        startupTimer = null;
+        // The catastrophic-backtracking budget starts only after the worker is
+        // online; process startup and a busy --jobs queue are not regex time.
+        matchTimer = setTimeout(() => finish({
+          matched: false,
+          error: "EXPECT regex exceeded " + REGEX_TIMEOUT_MS + "ms",
+        }), REGEX_TIMEOUT_MS);
+        try { worker.postMessage({ source: expectation.source, flags: expectation.flags, output }); }
+        catch (error) { finish({ matched: false, error: error.message }); }
+      });
+      worker.once("message", (message) => finish(message));
+      worker.once("error", (error) => finish({ matched: false, error: error.message }));
+      worker.once("exit", (code) => {
+        finish({ matched: false, error: "EXPECT worker exited " + code + " without a result" });
+      });
+    });
+  } finally {
+    releaseRegexWorker();
+  }
 }
 
 function runCheck(task) {
@@ -497,9 +635,9 @@ function runCheck(task) {
     };
 
     try {
-      child = spawn(task.gate.check, {
+      child = spawn(process.execPath, [CHECK_SUPERVISOR, shell, task.gate.check], {
         cwd: task.cwd,
-        shell,
+        shell: false,
         windowsHide: true,
         detached: process.platform !== "win32",
         env: process.env,
@@ -557,7 +695,15 @@ const runnable = [];
 const notRun = [];
 let approvalInfrastructureFailures = 0;
 for (const task of pending) {
-  if (!approvalExists(task.file, task.gate)) {
+  let approved = false;
+  try { approved = approvalExists(task.file, task.gate); }
+  catch (error) {
+    console.error("gate-check: could not validate approval for " + qualify(task.file, task.gate.id) + ": " + error.message);
+    approvalInfrastructureFailures++;
+    notRun.push(task);
+    continue;
+  }
+  if (!approved) {
     printOracle(task.file, task.gate, "APPROVAL REQUIRED");
     if (!opt.approve) {
       console.log("    NOT RUN: inspect this oracle, then re-run with --approve");
@@ -566,7 +712,7 @@ for (const task of pending) {
     }
     try {
       await recordApproval(task.file, task.gate);
-      console.log("    APPROVED: " + approvalPath(task.file, task.gate));
+      console.log("    APPROVED: " + approvalPath(task.file, task.gate, validatedApprovalDir().path));
     } catch (error) {
       console.error("gate-check: could not record approval for " + qualify(task.file, task.gate.id) + ": " + error.message);
       approvalInfrastructureFailures++;
@@ -581,14 +727,26 @@ for (const task of runnable) {
   console.log("  RUN  " + qualify(task.file, task.gate.id) + " shell=" + shell + " cwd=" + task.cwd + " PATH=" + pathTranscript);
 }
 const results = opt.status ? [] : await runRolling(runnable, jobs);
+const outputFingerprint = (output) => ({
+  sha256: sha256(String(output)),
+  bytes: Buffer.byteLength(String(output), "utf8"),
+});
 for (const result of results) {
-  const outputSummary = result.ok ? tail(result.output) : failureOutput(result.output);
+  const fingerprint = outputFingerprint(result.output);
+  const outputSummary = result.ok
+    ? "sha256=" + fingerprint.sha256 + "; bytes=" + fingerprint.bytes
+    : failureOutput(result.output);
   const outcome = "exit=" + (result.exitCode === null ? "none" : result.exitCode) +
     (result.signal ? " signal=" + result.signal : "") +
     "; EXPECT=" + (result.matched ? "matched" : "not matched") +
     "; output=" + outputSummary;
-  if (result.ok) console.log("  PASS " + qualify(result.file, result.gate.id) + ": " + result.gate.title + "\n       " + outcome);
-  else console.log("  FAIL " + qualify(result.file, result.gate.id) + ": " + result.gate.title + "\n       " + (result.error ? result.error + "; " : "") + outcome);
+  if (result.ok) {
+    console.log("  PASS " + qualify(result.file, result.gate.id) + ": " + result.gate.title);
+    console.log("       " + outcome);
+  } else {
+    console.log("  FAIL " + qualify(result.file, result.gate.id) + ": " + result.gate.title);
+    console.log("       " + (result.error ? result.error + "; " : "") + outcome);
+  }
 }
 
 function failureOutput(output, max = 480) {
@@ -599,9 +757,11 @@ function failureOutput(output, max = 480) {
 }
 
 function evidenceFor(result) {
-  const clean = (value) => String(value).replace(/[\r\n]+/g, " ");
+  const clean = (value) => terminalSafe(value).replace(/[\r\n\t]+/g, " ");
+  const fingerprint = outputFingerprint(result.output);
   return ("exit=0; shell=" + clean(shell) + "; cwd=" + clean(result.cwd) +
-    "; path=" + pathEvidence + "; output=" + clean(tail(result.output))).slice(0, 900);
+    "; path=" + pathEvidence + "; EXPECT=matched; output-sha256=" + fingerprint.sha256 +
+    "; output-bytes=" + fingerprint.bytes).slice(0, 900);
 }
 
 function insertOrUpdateEvidence(doc, gate, value) {

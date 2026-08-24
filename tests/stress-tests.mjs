@@ -236,6 +236,22 @@ test("installer: malformed settings shapes are refused without mutation", async 
   }
 });
 
+test("installer: a FIFO settings target is rejected without blocking", async () => {
+  if (process.platform === "win32") return;
+  const s = sandbox();
+  try {
+    mkdirSync(s.path(".claude"), { recursive: true });
+    const target = s.path(".claude/settings.local.json");
+    const made = spawnSync("mkfifo", [target], { encoding: "utf8" });
+    assert(made.status === 0, "could not create FIFO fixture: " + made.stderr);
+    const started = Date.now();
+    const result = await run(INSTALL, [], { cwd: s.dir, timeoutMs: 2000 });
+    assert(result.code === 1, "FIFO installer target did not fail closed\n" + result.out);
+    assert(Date.now() - started < 1800, "FIFO installer validation blocked");
+    has(result.out, "Refusing to touch");
+  } finally { s.cleanup(); }
+});
+
 test("installer: uninstall preserves a sibling in the same matcher group and writes a backup", async () => {
   const s = sandbox();
   try {
@@ -259,6 +275,27 @@ test("installer: uninstall preserves a sibling in the same matcher group and wri
     assert(after.hooks.Stop[0].hooks.length === 1, "wrong handler count");
     has(after.hooks.Stop[0].hooks[0].command, "other-tool.mjs");
     assert(s.read(".claude/settings.local.json.unlazy.bak") === original, "backup did not preserve original bytes");
+  } finally { s.cleanup(); }
+});
+
+test("installer: marker substrings do not claim an unrelated stop hook", async () => {
+  const s = sandbox();
+  try {
+    const unrelated = [
+      "node /opt/other/stop-hook.mjs --unlazy-helper",
+      "node /opt/unlazy/scripts/stop-hook.mjs --unlazy-helper",
+      "node " + JSON.stringify(STOP_HOOK) + " --unlazy-helper",
+      "node " + JSON.stringify(STOP_HOOK) + " \"--unlazy-helper\"",
+    ];
+    s.write(".claude/settings.local.json", JSON.stringify({
+      hooks: { Stop: [{ hooks: unrelated.map((command) => ({ type: "command", command, timeout: 20 })) }] },
+    }, null, 2) + "\n");
+    const result = await run(INSTALL, ["--uninstall"], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    has(result.out, "Nothing to remove");
+    const after = JSON.parse(s.read(".claude/settings.local.json"));
+    assert(after.hooks.Stop[0].hooks.map((hook) => hook.command).join("\n") === unrelated.join("\n"),
+      "unrelated hook was removed");
   } finally { s.cleanup(); }
 });
 

@@ -23,6 +23,7 @@ const SCRIPTS = [
   "scripts/install-hooks.mjs",
   "scripts/lib/gates.mjs",
   "scripts/lib/dispatch.mjs",
+  "scripts/lib/check-supervisor.mjs",
   "scripts/lib/process-tree.mjs",
   "scripts/lib/regex-worker.mjs",
   "tests/run-tests.mjs",
@@ -84,7 +85,10 @@ check("checks wait for close and cap output", () => {
 
 check("approval identity binds execution semantics", () => {
   const src = read("scripts/gate-check.mjs");
-  const required = ["check:", "expect:", "cwd", "shell", "timeoutMs", "maxOutputBytes", "regexTimeoutMs", "platform", "path:"];
+  const required = [
+    "check:", "expect:", "cwd", "shell", "timeoutMs", "maxOutputBytes",
+    "regexTimeoutMs", "regexStartupTimeoutMs", "maxRegexWorkers", "platform", "path:",
+  ];
   const missing = required.filter(token => !src.includes(token));
   return missing.length ? "approval oracle missing source tokens: " + missing.join(", ") : null;
 });
@@ -96,13 +100,15 @@ check("the hook resolves a scope rather than globbing the tree", () => {
   return null;
 });
 
-check("every reference doc the skill links to exists", () => {
+check("every local resource the skill names exists", () => {
   const skill = read("SKILL.md");
   const missing = [];
-  for (const m of skill.matchAll(/\]\((references\/[^)]+|templates\/[^)]+|scripts\/[^)]+)\)/g)) {
-    try { read(m[1]); } catch { missing.push(m[1]); }
+  const named = new Set();
+  for (const m of skill.matchAll(/`((?:references|templates|scripts)\/[^`\s]+|SECURITY\.md)`/g)) named.add(m[1]);
+  for (const path of named) {
+    try { read(path); } catch { missing.push(path); }
   }
-  return missing.length ? "SKILL.md links to missing files: " + missing.join(", ") : null;
+  return missing.length ? "SKILL.md names missing local resources: " + missing.join(", ") : null;
 });
 
 check("all executable sources retain the Node 16 floor", () => {
