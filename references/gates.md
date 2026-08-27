@@ -127,6 +127,21 @@ Make a ledger require its own quality by linting as a gate:
 
 Use abandonment only when a required outcome is genuinely impossible within the authorized task. Keep the original gate, add one non-empty reason, and name the abandonment in the final report. An abandonment is a terminal visible handoff, not a passing check: `gate-check` prints `HANDOFF REQUIRED` and exits `1` even when every non-abandoned gate is met. The Stop hook allows the session to end but emits a bounded handoff message containing qualified ids, not free-form reasons. Never promote an abandoned child through a parent `ALL MET` oracle or describe the task as fully complete.
 
+## Leaf gates versus branch gates
+
+Place a gate where its evidence lives. A leaf ledger proves one leaf, so give it
+only gates that read that leaf's own artifact and that its declared `OWNS:` paths
+can satisfy alone. A parent re-verifies a returned leaf by naming its exact
+ledger; a whole-project check smuggled into a leaf therefore makes every per-leaf
+`--reverify` re-run the entire tree instead of the one leaf that returned.
+
+Cross-cutting outcomes belong in the branch ledger, where they run once after all
+named children return: interface compatibility, end-to-end behavior, and
+regression across the joined work. `templates/gates-node.md` reserves `N1`
+through `N6` for exactly these. A regression or end-to-end gate duplicated in
+each leaf is both slower and weaker evidence than the single branch gate that
+observes the composed result.
+
 ## Concurrency
 
 Use `OWNS:` only as part of the coordination protocol in [parallel.md](parallel.md). It does not restrict a command's filesystem access. Concurrent leaves must declare disjoint paths, claim them before dispatch, and release them after verification.

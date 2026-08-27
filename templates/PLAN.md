@@ -53,6 +53,38 @@ Use `leaf-` paths for work leaves and `node-` paths for branch integration.
 
 Every leaf repeats its complete ownership as an `OWNS:` header in its ledger. Claim each concurrently dispatched leaf with `--claim`, then open and seal a native launch wave as described in `references/dispatch.md` before changing its state to IN-FLIGHT.
 
+## Leaf dispatch table
+
+One row per leaf. `Owns` repeats the leaf ledger's `OWNS:` header so what is
+parallelizable is visible at plan time, not only inside each ledger. `Tier`
+records the reasoning strength the leaf needs; it is a requirement, not a model
+name; the host router binds a tier to a model. Keep this table in agreement with
+the tree above.
+
+| Leaf | Owns | Needs | Tier | State |
+|---|---|---|---|---|
+| 1.1.1 | src/<a>/**, tests/<a>/** | - | mechanical | READY |
+| 1.1.2 | src/<b>/**, tests/<b>/** | - | judgment | READY |
+| 1.2.1 | src/<c>/**, tests/<c>/** | - | mechanical | READY |
+| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | WAITING |
+
+Use `judgment` for design, integration, security, and verification leaves;
+`mechanical` only for a leaf whose pattern and acceptance gates are already
+fixed. Do not name a specific model in this file.
+
+## Dispatch schedule
+
+Decide the launch waves before fan-out instead of improvising them. A leaf joins
+the first wave in which every id in its `Needs` is already VERIFIED; the wave
+policy in the contract caps how many launch together.
+
+- Wave 1 (independent, launch together): 1.1.1, 1.1.2, 1.2.1
+- Wave 2 (after 1.2.1 is VERIFIED): 1.2.2
+
+This schedule is the plan, not a barrier: rolling dispatch may launch a later
+leaf the moment its own `Needs` are verified. Record actual launches in
+`status.log`, never here.
+
 ## Status log
 
 Append events to `.unlazy/<scope>/status.log`; do not copy the event history into this file:

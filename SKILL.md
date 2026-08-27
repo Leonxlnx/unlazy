@@ -95,6 +95,6 @@ Default installation writes machine-specific project-local settings. Keep `.clau
 
 ## Spend attention where it compounds
 
-Keep leaf briefs to the contract and one ledger. Append status instead of rewriting history. Use stronger reasoning for design, integration, and verification; use cheaper execution only for genuinely mechanical leaves. Read the local `references/token-economy.md` for the detailed rules.
+Keep leaf briefs to the contract and one ledger. Append status instead of rewriting history. Mark each leaf's reasoning tier in the PLAN dispatch table (`judgment` for design, integration, and verification; `mechanical` only for genuinely mechanical leaves), then let the host router bind that tier to a model instead of hard-coding one here. Read the local `references/token-economy.md` for the detailed rules.
 
 Do not create gates for a trivial edit or factual reply. Use this discipline when the cost of quiet incompleteness justifies the ledger.
