@@ -63,6 +63,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Add valid `agents/openai.yaml` metadata and keep `SKILL.md` focused through linked references.
 - Add a revisioned PLAN contract inventory that maps every independently omittable required outcome and acceptance-changing constraint to an owner and observation, plus request rereads before fan-out and root completion.
 - Correct research titles, dates, ordering, and metric interpretation. Add a reproducibility protocol and label the historical six-run comparison's missing raw artifacts.
+- Sharpen `SKILL.md` prose without touching the format: define `<skill-dir>` and `<scope>` once near the first command, qualify the solo starting ledger and name the orchestrated starting set, name the four verification layers with a pointer, make the trigger description host-neutral, add lease release to the Parallel bullet, and trim the Stop-hook mechanics to a pointer. Parser, checker, hook, templates, and tests unchanged.
 
 ### Community work integrated
 

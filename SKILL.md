@@ -1,6 +1,6 @@
 ---
 name: unlazy
-description: Enforces completion discipline for substantial autonomous work by writing acceptance gates before execution, decomposing work with the Depth Tree, running approved checks, and re-verifying evidence before reporting. Use when Codex faces a long or multi-part task, work that has returned half-done, an exhaustive audit or build, parallel leaves or pipelines, or explicit triggers such as /unlazy, $unlazy, "tree N", "gates", and "do not stop until it is done".
+description: Enforces completion discipline for substantial autonomous work by writing acceptance gates before execution, decomposing work with the Depth Tree, running approved checks, and re-verifying evidence before reporting. Use when an agent faces a long or multi-part task, work that has returned half-done, an exhaustive audit or build, parallel leaves or pipelines, or explicit triggers such as /unlazy, $unlazy, "tree N", "gates", and "do not stop until it is done".
 ---
 
 # Unlazy
@@ -9,7 +9,9 @@ Make incomplete work visible and make completion testable. Prove outcomes agains
 
 ## Write gates before real work
 
-Create `GATES.md` from the local file `templates/gates-leaf.md` before implementing. State one observable outcome per gate. Give every runnable gate an indented `CHECK:` and `EXPECT:`; use a manual gate only when no command can decide the outcome.
+For solo work, create `GATES.md` from the local file `templates/gates-leaf.md` before implementing (orchestrated mode instead starts from `templates/PLAN.md` plus per-leaf `templates/gates-leaf.md` and per-branch `templates/gates-node.md` under `.unlazy/<scope>/`; see Build the Depth Tree below). State one observable outcome per gate. Give every runnable gate an indented `CHECK:` and `EXPECT:`; use a manual gate only when no command can decide the outcome.
+
+Throughout this file, `<skill-dir>` is the directory containing this `SKILL.md` and `<scope>` is a pipeline id under `.unlazy/`.
 
 Treat `CHECK:` as code. Before executing an inherited ledger, parse it without running anything and read every command and called script:
 
@@ -35,7 +37,7 @@ Do not silently remove an impossible gate. Add `ABANDON: <id> <non-empty reason>
 
 - **Solo:** Use one `GATES.md` for a focused task that fits one working session. For several independently required outcomes, reread the current request before completion and give each outcome or acceptance-changing constraint a gate or explicit handoff; a PLAN table is not required.
 - **Orchestrated:** For a build or deep review, read the local `references/method.md`, `references/orchestration.md`, and `references/dispatch.md`. Write the contract and tree before fan-out. Give every leaf and branch its own gates file.
-- **Parallel:** Before dispatching concurrent leaves or pipelines, also read the local `references/parallel.md`. Declare disjoint `OWNS:` paths, claim them, and use a dispatch launch wave. Treat scopes, leases, and wave state as coordination, never as filesystem isolation or a security boundary.
+- **Parallel:** Before dispatching concurrent leaves or pipelines, also read the local `references/parallel.md`. Declare disjoint `OWNS:` paths, claim them, use a dispatch launch wave, and release those leaf and scope leases after parent verification. Treat scopes, leases, and wave state as coordination, never as filesystem isolation or a security boundary.
 
 Keep check execution sequential by default. Use `--jobs <N>` only for independent runnable gates when deterministic parallel verification saves wall-clock time. Continue printing and recording results in gate order. `--jobs` never creates agent sessions; native agent concurrency follows the dispatch contract.
 
@@ -49,6 +51,8 @@ Keep check execution sequential by default. Use `--jobs <N>` only for independen
 6. Re-run each returned leaf's runnable gates with `--reverify`; do not mistake `--status` for re-execution.
 
 Use rolling dispatch: when a verified leaf unblocks another, open and launch the next ready wave without waiting for unrelated in-flight work. Keep states and dependencies in `PLAN.md`; keep dispatch state in `.unlazy/<scope>/dispatch.json`; append events to the scope status log.
+
+Verification runs in four layers: leaf self-check, parent `--reverify`, branch integration, and the optional Stop hook (a structural backstop that does not itself execute checks). Only the parent and branch layers are independent of the leaf. See `references/orchestration.md`.
 
 ## Work each leaf in four passes
 
@@ -89,9 +93,9 @@ Offer the hook once when structural stop enforcement would materially help. Neve
 node <skill-dir>/scripts/install-hooks.mjs
 ```
 
-The hook returns Claude Code's top-level `decision: "block"` response while this session's resolved pipeline has unmet gates or incomplete dispatch waves. Its own session-keyed progress guard releases after six consecutive blocks without a change in resolved gate or dispatch state. Editing ledger or dispatch metadata is not progress; changing a gate or wave's semantic state is. Remove it with `--uninstall`.
+The hook returns Claude Code's top-level `decision: "block"` response while this session's resolved pipeline has unmet gates or incomplete dispatch waves, and its progress guard releases after six no-progress blocks so it cannot wedge. Remove it with `--uninstall`.
 
-Default installation writes machine-specific project-local settings. Keep `.claude/settings.local.json`, `.unlazy/`, and `.unlazy-hook-state.json` in the project's ignore rules. Shared installation contains absolute Node and hook-script paths and is usually not portable across machines. Read the local `SECURITY.md` before choosing an install target.
+Keep `.claude/settings.local.json`, `.unlazy/`, and `.unlazy-hook-state.json` untracked. A shared install embeds machine-specific absolute paths and is usually not portable; read the local `SECURITY.md` before choosing an install target and for the progress-guard details.
 
 ## Spend attention where it compounds
 
