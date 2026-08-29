@@ -45,7 +45,11 @@ function run(script, args, options = {}) {
       env: { ...process.env, ...(options.env || {}) },
       timeout: options.timeoutMs,
     }, (error, stdout, stderr) => {
-      done({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, out: (stdout || "") + (stderr || "") });
+      done({
+        code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
+        out: (stdout || "") + (stderr || ""),
+        timedOut: Boolean(error && error.killed),
+      });
     });
     if (options.stdin !== undefined) child.stdin.end(options.stdin);
   });
@@ -223,8 +227,9 @@ test("leases: linked and FIFO records fail closed while a regular record remains
 
     linkSync(victim, poison);
     let result = await run(GATE_CHECK, ["--scope", "fresh", "--leaf", "leaf", "--claim"], {
-      cwd: s.dir, timeoutMs: 1500,
+      cwd: s.dir, timeoutMs: 5000,
     });
+    assert(!result.timedOut, "hard-linked lease check reached the process timeout");
     assert(result.code === 3, "hard-linked lease did not fail closed\n" + result.out);
     assert(readFileSync(victim, "utf8").includes("src/victim/**"), "hard-link victim was changed");
     rmSync(poison);
@@ -232,8 +237,9 @@ test("leases: linked and FIFO records fail closed while a regular record remains
     if (process.platform !== "win32") {
       symlinkSync(victim, poison);
       result = await run(GATE_CHECK, ["--scope", "fresh", "--leaf", "leaf", "--claim"], {
-        cwd: s.dir, timeoutMs: 1500,
+        cwd: s.dir, timeoutMs: 5000,
       });
+      assert(!result.timedOut, "symlinked lease check reached the process timeout");
       assert(result.code === 3, "symlinked lease did not fail closed\n" + result.out);
       rmSync(poison);
 
@@ -243,6 +249,7 @@ test("leases: linked and FIFO records fail closed while a regular record remains
       result = await run(GATE_CHECK, ["--scope", "fresh", "--leaf", "leaf", "--claim"], {
         cwd: s.dir, timeoutMs: 1500,
       });
+      assert(!result.timedOut, "FIFO lease reached the process timeout");
       assert(result.code === 3, "FIFO lease did not fail closed promptly\n" + result.out);
       assert(Date.now() - started < 1500, "FIFO lease reached the process timeout");
       rmSync(poison);

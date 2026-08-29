@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Black-box tests for dispatch launch barriers. Zero dependencies, Node 16+.
 
-import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -15,6 +18,7 @@ const filter = process.argv[2] || "";
 const tests = [];
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
 const EMPTY_DISPATCH_STATE = JSON.stringify({ schema: 1, waves: {} }) + "\n";
+const REPLACEMENT_DISPATCH_STATE = '{ "schema": 1, "waves": {} }\n';
 
 const test = (name, fn) => tests.push({ name, fn });
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -289,7 +293,7 @@ test("state file: replacement during the read is rejected as unstable", async ()
     const replacement = join(s.dir, ".unlazy", "api", "replacement.json");
     const preload = join(s.dir, "replace-after-lstat.cjs");
     s.write(".unlazy/api/dispatch.json", EMPTY_DISPATCH_STATE);
-    s.write(".unlazy/api/replacement.json", EMPTY_DISPATCH_STATE);
+    s.write(".unlazy/api/replacement.json", REPLACEMENT_DISPATCH_STATE);
     s.write("replace-after-lstat.cjs", [
       "const fs = require('node:fs')",
       "const { resolve } = require('node:path')",
@@ -309,15 +313,20 @@ test("state file: replacement during the read is rejected as unstable", async ()
       cwd: s.dir,
       nodeArgs: ["--require", preload],
       env: {
-        UNLAZY_TEST_STATE_TARGET: state,
-        UNLAZY_TEST_STATE_REPLACEMENT: replacement,
+        // macOS exposes /var through the canonical /private/var path. The
+        // child can therefore observe a different lexical temp path than the
+        // parent even though both name the same file. Compare canonical paths
+        // so the fixture always replaces after descriptor acquisition.
+        UNLAZY_TEST_STATE_TARGET: realpathSync(state),
+        UNLAZY_TEST_STATE_REPLACEMENT: realpathSync(replacement),
       },
     });
     assert(result.code === 2, "replaced dispatch state should exit 2\n" + result.out);
     assertHas(result.out, "invalid dispatch state");
     assertHas(result.out, "changed before it was read");
-    assert(s.read(".unlazy/api/dispatch.json") === EMPTY_DISPATCH_STATE,
-      "replacement fixture did not leave a valid final state");
+    assert(!existsSync(replacement), "replacement fixture hook never ran");
+    assert(s.read(".unlazy/api/dispatch.json") === REPLACEMENT_DISPATCH_STATE,
+      "replacement fixture did not leave the distinct valid replacement state");
   } finally { s.cleanup(); }
 });
 

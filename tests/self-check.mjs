@@ -35,7 +35,9 @@ const SCRIPTS = [
   "tests/self-check.mjs",
 ];
 
-const read = (p) => readFileSync(join(ROOT, p), "utf8");
+// Git may materialize CRLF on Windows. Structural source checks operate on
+// text, so normalize checkout line endings before matching multiline rules.
+const read = (p) => readFileSync(join(ROOT, p), "utf8").replace(/\r\n/g, "\n");
 const checks = [];
 const check = (name, fn) => checks.push({ name, fn });
 
