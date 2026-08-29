@@ -51,6 +51,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Key Stop-hook progress state to the session and scope, serialize state changes, and retain unlazy's own six-block no-progress release.
 - Compare resolved gate state between stops rather than raw ledger bytes. A comment, a reflowed line, or a rewritten evidence line no longer counts as progress, so the six-block release can fire for an agent that is editing without advancing.
 - Compare canonical dispatch state and counts in the same guard, so timestamps and metadata do not impersonate launch progress.
+- State the leaf-versus-branch gate placement rule in `references/gates.md`, so whole-project checks (interface, end-to-end, regression) live in the branch ledger and run once instead of re-running the tree on every per-leaf `--reverify`. Add a PLAN leaf dispatch table (Owns, Needs, Tier) and an explicit wave schedule so plan-time parallelism is visible, and reduce the token-economy tiering guidance to declaring a per-leaf reasoning Tier while the host router binds that Tier to a model.
 
 ### Installer, package, and documentation
 
@@ -62,6 +63,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Add valid `agents/openai.yaml` metadata and keep `SKILL.md` focused through linked references.
 - Add a revisioned PLAN contract inventory that maps every independently omittable required outcome and acceptance-changing constraint to an owner and observation, plus request rereads before fan-out and root completion.
 - Correct research titles, dates, ordering, and metric interpretation. Add a reproducibility protocol and label the historical six-run comparison's missing raw artifacts.
+- Sharpen `SKILL.md` prose without touching the format: define `<skill-dir>` and `<scope>` once near the first command, qualify the solo starting ledger and name the orchestrated starting set, name the four verification layers with a pointer, make the trigger description host-neutral, add lease release to the Parallel bullet, and trim the Stop-hook mechanics to a pointer. Parser, checker, hook, templates, and tests unchanged.
 
 ### Community work integrated
 
