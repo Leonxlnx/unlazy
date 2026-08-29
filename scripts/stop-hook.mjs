@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 // Claude Code Stop hook for one unlazy pipeline. Zero dependencies. Node 16+.
 
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  UNLAZY_DIR, gateState, hookStatePath, parseGates, qualify, resolveTarget,
-  sha256, validateScopeId, withFileLock, writeAtomic,
+  UNLAZY_DIR, gateState, hookStatePath, parseGates, qualify, readStableRegularFile,
+  resolveTarget, sha256, validateScopeId, withFileLock, writeAtomic,
 } from "./lib/gates.mjs";
 import { dispatchStatus } from "./lib/dispatch.mjs";
 
 const MAX_BLOCKS = 6;
+const MAX_GATE_LEDGER_BYTES = 8 * 1024 * 1024;
+const MAX_HOOK_STATE_BYTES = 1024 * 1024;
 const safeHostText = (value, max = 500) => String(value)
-  .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ")
+  .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, " ")
   .replace(/\s+/g, " ")
   .trim()
   .slice(0, max);
@@ -30,6 +32,22 @@ function normalizeHookState(value) {
     sessions[key] = current;
   }
   return { schema: 1, sessions };
+}
+
+function readHookState(path, root) {
+  let text;
+  try {
+    text = readStableRegularFile(path, {
+      root, maxBytes: MAX_HOOK_STATE_BYTES, label: "hook state",
+    });
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return { missing: true, state: { schema: 1, sessions: {} } };
+    }
+    throw error;
+  }
+  try { return { missing: false, state: normalizeHookState(JSON.parse(text)) }; }
+  catch { return { missing: false, state: { schema: 1, sessions: {} } }; }
 }
 
 const args = process.argv.slice(2);
@@ -51,7 +69,6 @@ catch { allow(null); }
 
 const root = resolve(typeof payload.cwd === "string" && payload.cwd ? payload.cwd : process.cwd());
 const sessionId = payload.session_id || payload.sessionId || "anonymous";
-const sessionKey = sha256(String(sessionId)).slice(0, 24);
 const target = resolveTarget({ root, scope: scopeArg, sessionId });
 
 if (target.ambiguous) {
@@ -60,15 +77,21 @@ if (target.ambiguous) {
 }
 if (target.error && !target.ambiguous) allow("unlazy: " + safeHostText(target.error) + "; not blocking.");
 
-const statePath = hookStatePath(root, target.scope);
+const discoveryErrors = target.discoveryErrors || [];
+// An invalid named scope cannot safely hold its own hook-state file. Keep its
+// bounded loop-guard state at the real repository root and include the target
+// identity in the session key so it cannot collide with another scope.
+const statePath = hookStatePath(root, discoveryErrors.length ? null : target.scope);
+const sessionKey = sha256(String(sessionId) + "\0" + String(target.scope || "unscoped")).slice(0, 24);
 
 async function clearSessionState() {
-  if (!existsSync(statePath)) return;
+  try { if (readHookState(statePath, root).missing) return; }
+  catch { return; }
   try {
     await withFileLock(root, statePath, () => {
-      let state = { schema: 1, sessions: {} };
-      try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch { /* replace invalid local state */ }
-      state = normalizeHookState(state);
+      const loaded = readHookState(statePath, root);
+      if (loaded.missing) return;
+      const state = loaded.state;
       delete state.sessions[sessionKey];
       if (!Object.keys(state.sessions).length) {
         try { unlinkSync(statePath); } catch { /* already absent */ }
@@ -79,15 +102,18 @@ async function clearSessionState() {
   }
 }
 
-const dispatch = dispatchStatus(root, target.scope);
+// Do not even open dispatch state through a scope path already proven unsafe.
+const dispatch = discoveryErrors.length
+  ? { blocking: [], abandoned: [], resolved: [] }
+  : dispatchStatus(root, target.scope);
 
-if (!target.files.length && !dispatch.blocking.length && !dispatch.abandoned.length) {
+if (!target.files.length && !discoveryErrors.length && !dispatch.blocking.length && !dispatch.abandoned.length) {
   await clearSessionState();
   allow(null);
 }
 
 const unmet = [...dispatch.blocking];
-const invalid = [];
+const invalid = discoveryErrors.map((error) => "discovery:PARSE " + safeHostText(error));
 const handoffs = [...dispatch.abandoned];
 const handoffMessage = () => {
   if (!handoffs.length) return "";
@@ -103,9 +129,14 @@ const handoffMessage = () => {
 // Dispatch issue strings encode only canonical state and counts, not raw JSON
 // bytes or timestamps, so metadata-only edits do not reset the same guard.
 const resolved = [...dispatch.resolved];
+if (discoveryErrors.length) resolved.push("discovery:PARSE=invalid");
 for (const file of [...target.files].sort()) {
   let text;
-  try { text = readFileSync(file, "utf8"); }
+  try {
+    text = readStableRegularFile(file, {
+      root, maxBytes: MAX_GATE_LEDGER_BYTES, label: "gate ledger",
+    });
+  }
   catch (error) {
     invalid.push(qualify(file, "PARSE") + " unreadable: " + safeHostText(error.message));
     resolved.push(qualify(file, "PARSE") + "=unreadable");
@@ -138,9 +169,7 @@ const progressHash = sha256(resolved.sort().join("\0")).slice(0, 24);
 let sessionState;
 try {
   sessionState = await withFileLock(root, statePath, () => {
-    let state = { schema: 1, sessions: {} };
-    try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch { /* new or corrupt local state */ }
-    state = normalizeHookState(state);
+    const state = readHookState(statePath, root).state;
     let current = state.sessions[sessionKey];
     if (!current || current.hash !== progressHash) current = { hash: progressHash, blocks: 0 };
     current.blocks += 1;
@@ -153,6 +182,14 @@ try {
     return current;
   }, { timeoutMs: 10000 });
 } catch (error) {
+  if (discoveryErrors.length) {
+    console.log(JSON.stringify({
+      decision: "block",
+      reason: "unlazy: invalid named scope input must be repaired before Stop: " +
+        safeHostText(discoveryErrors[0]),
+    }));
+    process.exit(0);
+  }
   allow("unlazy: could not update the serialized hook state (" + safeHostText(error.message) + "); not blocking to avoid a trap.");
 }
 

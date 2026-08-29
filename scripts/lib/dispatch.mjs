@@ -1,15 +1,15 @@
 // Atomic host-dispatch wave state. Zero dependencies. Node 16+.
 
-import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  appendStatus, scopeRoot, validateScopeId, withFileLock, writeAtomic,
+  appendStatus, readStableRegularFile, scopeRoot, validateScopeId, withFileLock, writeAtomic,
 } from "./gates.mjs";
 
 const SCHEMA = 1;
+const MAX_STATE_BYTES = 8 * 1024 * 1024;
 const STATES = new Set(["open", "sealed", "complete", "abandoned"]);
-const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
-const CONTROL_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
+const CONTROL_GLOBAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g;
 
 const record = (value = {}) => Object.assign(Object.create(null), value);
 const emptyState = () => ({ schema: SCHEMA, waves: record() });
@@ -152,12 +152,16 @@ function validateState(state) {
   return state;
 }
 
-function readState(path) {
-  if (!existsSync(path)) return emptyState();
+function readState(root, path) {
   try {
-    if (lstatSync(path).isSymbolicLink()) fail("refusing dispatch state symlink");
-    return validateState(JSON.parse(readFileSync(path, "utf8")));
+    const text = readStableRegularFile(path, {
+      root: resolve(root),
+      maxBytes: MAX_STATE_BYTES,
+      label: "dispatch state",
+    });
+    return validateState(JSON.parse(text));
   } catch (error) {
+    if (error && error.code === "ENOENT") return emptyState();
     if (String(error.message).startsWith("invalid dispatch state:")) throw error;
     throw new Error("invalid dispatch state: " + error.message);
   }
@@ -169,7 +173,7 @@ export function dispatchStatePath(root, scope) {
 
 export function getDispatchWave(root, scope, waveId) {
   const wave = validId(waveId, "wave");
-  const state = readState(dispatchStatePath(root, scope));
+  const state = readState(root, dispatchStatePath(root, scope));
   if (!state.waves[wave]) fail("unknown wave " + wave);
   return state.waves[wave];
 }
@@ -181,7 +185,7 @@ export function dispatchIssues(root, scope) {
 export function dispatchStatus(root, scope) {
   if (!scope) return { blocking: [], abandoned: [], resolved: [], errors: [] };
   let state;
-  try { state = readState(dispatchStatePath(root, scope)); }
+  try { state = readState(root, dispatchStatePath(root, scope)); }
   catch (error) {
     const message = safeDiagnostic(error.message);
     return {
@@ -216,7 +220,7 @@ export async function updateDispatch(root, spec) {
   let event = "";
 
   const wave = await withFileLock(root, path, () => {
-    const state = readState(path);
+    const state = readState(root, path);
     const now = spec.now || new Date().toISOString();
     validTime(now, "timestamp");
 
@@ -278,6 +282,12 @@ export async function updateDispatch(root, spec) {
     return state.waves[waveId];
   });
 
-  await appendStatus(root, scope, new Date().toISOString() + " " + event);
-  return wave;
+  let logWarning = "";
+  try {
+    await appendStatus(root, scope, new Date().toISOString() + " " + event);
+  } catch (error) {
+    logWarning = "state transition committed; audit status append was skipped: " +
+      safeDiagnostic(error && error.message ? error.message : error);
+  }
+  return { wave, logWarning };
 }

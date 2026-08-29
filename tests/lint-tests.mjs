@@ -7,7 +7,9 @@
 //
 // Prints "N/N passed" on success, which is the string CI matches on.
 
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import {
+  linkSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -31,6 +33,17 @@ function write(name, body) {
 function lint(...args) {
   const result = spawnSync(process.execPath, [LINT, ...args], { encoding: "utf8" });
   return { out: result.stdout + result.stderr, code: result.status };
+}
+
+// Program-authored line breaks and indentation are allowed. Repository or argv
+// data must not be able to emit terminal controls or Unicode bidi controls.
+const RAW_TERMINAL_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
+const RAW_DATA_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
+function assertTerminalSafe(output) {
+  assert.doesNotMatch(output, RAW_TERMINAL_CONTROL);
+}
+function assertDataSafe(value) {
+  assert.doesNotMatch(value, RAW_DATA_CONTROL);
 }
 
 // ------------------------------------------------------------- fixtures
@@ -92,6 +105,13 @@ Scope: pricing section renders and behaves
 const SOUND = write("sound.md", SOUND_BODY);
 const MANUAL = write("manual.md", SOUND_BODY + `
 - [ ] G6: copy reads as written by the brand, not by a model
+  EVIDENCE: pending
+`);
+const TAINT = "\u001b\u0007\u0085\u202e";
+const LINE_SEPARATORS = "\u2028\u2029";
+const TAINTED = write("unsafe-" + LINE_SEPARATORS + "\u202e.md", `# Gates: unsafe terminal data
+
+- [ ] G1: improve ${TAINT} terminal rendering
   EVIDENCE: pending
 `);
 
@@ -159,6 +179,53 @@ test("lint: a sound ledger is clean and exits 0", () => {
   assert.equal(code, 0);
 });
 
+test("lint: a symlink ledger is refused without changing its victim", () => {
+  if (process.platform === "win32") return;
+  const victim = write("symlink-victim.md", SOUND_BODY);
+  const before = readFileSync(victim, "utf8");
+  const alias = join(DIR, "symlink-ledger.md");
+  symlinkSync(victim, alias);
+  const { out, code } = lint(alias);
+  assert.equal(code, 2, out);
+  assert.match(out, /gate ledger must be one unchanged regular single-link file/);
+  assert.equal(readFileSync(victim, "utf8"), before);
+});
+
+test("lint: a hard-linked ledger is refused without changing its victim", () => {
+  const victim = write("hardlink-victim.md", SOUND_BODY);
+  const before = readFileSync(victim, "utf8");
+  const alias = join(DIR, "hardlink-ledger.md");
+  linkSync(victim, alias);
+  const { out, code } = lint(alias);
+  assert.equal(code, 2, out);
+  assert.match(out, /gate ledger must be one unchanged regular single-link file/);
+  assert.equal(readFileSync(victim, "utf8"), before);
+});
+
+test("lint: a FIFO ledger is refused promptly instead of blocking", () => {
+  if (process.platform === "win32") return;
+  const fifo = join(DIR, "ledger.fifo");
+  const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const started = Date.now();
+  const result = spawnSync(process.execPath, [LINT, fifo], {
+    encoding: "utf8",
+    timeout: 2000,
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(result.error, undefined, String(result.error));
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stdout + result.stderr, /gate ledger must be one unchanged regular single-link file/);
+  assert.ok(elapsed < 1000, "FIFO refusal took " + elapsed + "ms");
+});
+
+test("lint: a gate ledger over 8 MiB is refused before parsing", () => {
+  const oversized = write("oversized.md", "x".repeat(8 * 1024 * 1024 + 1));
+  const { out, code } = lint(oversized);
+  assert.equal(code, 2, out);
+  assert.match(out, /gate ledger exceeds 8388608 bytes/);
+});
+
 test("lint: default warnings and strict warnings have distinct gate markers and exits", () => {
   const normal = lint(MANUAL);
   assert.match(normal.out, /G6:.*judged by hand/);
@@ -178,6 +245,95 @@ test("lint: json reports counts and stays parseable", () => {
   assert.ok(data.findings.every((f) => f.rule && f.level));
   const strict = JSON.parse(lint("--strict", "--json", WEAK).out);
   assert.equal(strict.ok, false);
+});
+
+test("lint: default output escapes terminal and bidi controls in finding data", () => {
+  const { out, code } = lint(TAINTED);
+  assert.equal(code, 0, out);
+  assertTerminalSafe(out);
+  assert.match(out, /unsafe-\\u2028\\u2029\\u202e\.md/);
+  assert.match(out, /\\x1b\\x07\\x85\\u202e/);
+  assert.match(out, /^LINT OK \(\d+ warning\(s\)\)$/m);
+});
+
+test("lint: JSON escapes terminal data while retaining pretty parseable output", () => {
+  const { out, code } = lint("--json", TAINTED);
+  assert.equal(code, 0, out);
+  assertTerminalSafe(out);
+  assert.match(out, /^\{\n  "ok": true,/);
+  const data = JSON.parse(out);
+  assert.ok(data.findings.length > 0);
+  assert.ok(data.findings.every((finding) => {
+    assertDataSafe(finding.file);
+    assertDataSafe(finding.gate || "");
+    assertDataSafe(finding.rule);
+    assertDataSafe(finding.message);
+    return true;
+  }));
+  assert.ok(data.findings.some((finding) => finding.file.includes("\\u2028\\u2029\\u202e")));
+  assert.ok(data.findings.some((finding) => finding.message.includes("\\x1b\\x07\\x85\\u202e")));
+});
+
+test("CLI: unknown-option diagnostics escape terminal and bidi controls", () => {
+  const { out, code } = lint("--unsafe-" + TAINT + LINE_SEPARATORS);
+  assert.equal(code, 2, out);
+  assertTerminalSafe(out);
+  assert.match(out, /unknown option --unsafe-\\x1b\\x07\\x85\\u202e\\u2028\\u2029/);
+});
+
+test("lint: hostile field expansion stays bounded in text and JSON", () => {
+  const large = write("large-controls.md", [
+    "# Gates: bounded output",
+    "",
+    "- [ ] G1: improve " + "\u001b".repeat(1024 * 1024) + " terminal output",
+    "  EVIDENCE: pending",
+    "",
+  ].join("\n"));
+  const textResult = lint(large);
+  assert.equal(textResult.code, 0, textResult.out.slice(0, 2000));
+  assert.ok(Buffer.byteLength(textResult.out, "utf8") < 16 * 1024,
+    "text output was not bounded: " + Buffer.byteLength(textResult.out, "utf8"));
+  assert.match(textResult.out, /\.\.\.\[truncated\]/);
+  assertTerminalSafe(textResult.out);
+
+  const jsonResult = lint("--json", large);
+  assert.equal(jsonResult.code, 0, jsonResult.out.slice(0, 2000));
+  assert.ok(Buffer.byteLength(jsonResult.out, "utf8") < 32 * 1024,
+    "JSON output was not bounded: " + Buffer.byteLength(jsonResult.out, "utf8"));
+  const data = JSON.parse(jsonResult.out);
+  assert.ok(data.findings.some((finding) => finding.message.includes("...[truncated]")));
+  assertTerminalSafe(jsonResult.out);
+});
+
+test("lint: finding count is capped without hiding totals or failure state", () => {
+  const gates = [];
+  for (let index = 1; index <= 80; index++) {
+    gates.push("- [ ] G" + index + ": improve item " + index + "\n  EVIDENCE: pending");
+  }
+  const crowded = write("crowded.md", "# Gates: crowded\n\n" + gates.join("\n\n") + "\n");
+  const textResult = lint(crowded);
+  assert.equal(textResult.code, 0, textResult.out);
+  assert.match(textResult.out, /report truncated: 177 finding\(s\) omitted/);
+  assert.match(textResult.out, /LINT OK \(241 warning\(s\)\)/);
+  assert.ok(Buffer.byteLength(textResult.out, "utf8") < 256 * 1024);
+
+  const jsonResult = lint("--strict", "--json", crowded);
+  assert.equal(jsonResult.code, 1, jsonResult.out);
+  assert.ok(Buffer.byteLength(jsonResult.out, "utf8") < 256 * 1024);
+  const data = JSON.parse(jsonResult.out);
+  assert.equal(data.ok, false);
+  assert.equal(data.warnings, 241);
+  assert.equal(data.findings.length, 64);
+  assert.equal(data.truncated, true);
+  assert.equal(data.omittedFindings, 177);
+});
+
+test("CLI: help retains trusted multiline formatting", () => {
+  const { out, code } = lint("--help");
+  assert.equal(code, 0, out);
+  assert.match(out, /^usage: gate-lint\.mjs/m);
+  assert.ok(out.split(/\r?\n/).length > 4, out);
+  assert.doesNotMatch(out, /\\x0a/);
 });
 
 test("lint: a ledger the shared parser rejects exits 2, not 1", () => {

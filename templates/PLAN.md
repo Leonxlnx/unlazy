@@ -37,53 +37,71 @@ Leaf state is exactly one of:
 - VERIFIED: parent --reverify passed and manual gates were reviewed
 - ABANDONED: a required gate has a visible handoff
 
-Branch state is exactly one of OPEN, VERIFIED, or ABANDONED.
+Branch state is exactly one of OPEN, VERIFIED, or ABANDONED. Derive root and
+branch state from their ledgers; do not copy it into the topology tree.
 
 ## Tree
 
-Use `leaf-` paths for work leaves and `node-` paths for branch integration.
+Use this tree only for parent-child topology and ledger paths. Use `leaf-` paths
+for work leaves and `node-` paths for branch integration. Keep leaf operational
+fields only in the dispatch table below; do not repeat `Owns`, `Needs`, `Tier`,
+`Planned wave`, or `State` here and do not create a separate schedule.
 
-- 1 <task> .............. GATES.md ..................... State: OPEN
-  - 1.1 <branch> ........ gates/node-1.1.md ............ State: OPEN
-    - 1.1.1 <leaf> ...... gates/leaf-1.1.1.md .......... Needs: - ...... State: READY
-    - 1.1.2 <leaf> ...... gates/leaf-1.1.2.md .......... Needs: - ...... State: READY
-  - 1.2 <branch> ........ gates/node-1.2.md ............ State: OPEN
-    - 1.2.1 <leaf> ...... gates/leaf-1.2.1.md .......... Needs: - ...... State: READY
-    - 1.2.2 <leaf> ...... gates/leaf-1.2.2.md .......... Needs: 1.2.1 .. State: WAITING
-
-Every leaf repeats its complete ownership as an `OWNS:` header in its ledger. Claim each concurrently dispatched leaf with `--claim`, then open and seal a native launch wave as described in `references/dispatch.md` before changing its state to IN-FLIGHT.
+- 1 <task> .............. GATES.md
+  - 1.1 <branch> ........ gates/node-1.1.md
+    - 1.1.1 <leaf> ...... gates/leaf-1.1.1.md
+    - 1.1.2 <leaf> ...... gates/leaf-1.1.2.md
+  - 1.2 <branch> ........ gates/node-1.2.md
+    - 1.2.1 <leaf> ...... gates/leaf-1.2.1.md
+    - 1.2.2 <leaf> ...... gates/leaf-1.2.2.md
 
 ## Leaf dispatch table
 
-One row per leaf. `Owns` repeats the leaf ledger's `OWNS:` header so what is
-parallelizable is visible at plan time, not only inside each ledger. `Tier`
-records the reasoning strength the leaf needs; it is a requirement, not a model
-name; the host router binds a tier to a model. Keep this table in agreement with
-the tree above.
+This is the single authoritative PLAN table for leaf operation. It is
+authoritative for `Needs`, `Tier`, `Planned wave`, and `State`; `Owns` remains
+visible here as the derived planning mirror described below. Keep exactly one
+row per tree leaf and do not duplicate these fields in the tree or a schedule.
 
-| Leaf | Owns | Needs | Tier | State |
-|---|---|---|---|---|
-| 1.1.1 | src/<a>/**, tests/<a>/** | - | mechanical | READY |
-| 1.1.2 | src/<b>/**, tests/<b>/** | - | judgment | READY |
-| 1.2.1 | src/<c>/**, tests/<c>/** | - | mechanical | READY |
-| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | WAITING |
+| Leaf | Owns | Needs | Tier | Planned wave | State |
+|---|---|---|---|---|---|
+| 1.1.1 | src/<a>/**, tests/<a>/** | - | mechanical | 1 | READY |
+| 1.1.2 | src/<b>/**, tests/<b>/** | - | judgment | 1 | READY |
+| 1.2.1 | src/<c>/**, tests/<c>/** | - | mechanical | 1 | READY |
+| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | 2 | WAITING |
 
-Use `judgment` for design, integration, security, and verification leaves;
-`mechanical` only for a leaf whose pattern and acceptance gates are already
-fixed. Do not name a specific model in this file.
+`Owns` is a derived planning mirror of the complete glob set in the leaf ledger.
+The ledger's `OWNS:` header is the command-time authority read by `--claim`.
+Normalize both into sets and require equality before marking the row `READY` and
+again before each claim. On disagreement, fail closed, correct and log the plan
+or ledger, and recheck; never guess ownership. A successful claim does not prove
+the mirror agreed with the ledger.
 
-## Dispatch schedule
+`Tier` is planner metadata for execution leaves. Use `judgment` when a leaf's own
+artifact needs design or review, and `mechanical` only when its pattern and gates
+are fixed. Map a tier through documented host-specific model or reasoning
+controls only when the host exposes them. Otherwise retain the tier as a briefing
+and review requirement without claiming a model choice. Driver and branch duties,
+including planning, dispatch, parent verification, integration, and final audit,
+remain judgment responsibilities outside this leaf field. Tier never weakens a
+leaf's gates, parent re-verification, or integration standard.
 
-Decide the launch waves before fan-out instead of improvising them. A leaf joins
-the first wave in which every id in its `Needs` is already VERIFIED; the wave
-policy in the contract caps how many launch together.
+`Planned wave` is the earliest intended launch group under the current contract.
+Use a positive integer, put every dependency in an earlier planned wave, and let
+the wave policy cap concurrency. It is a plan, not a barrier: rolling dispatch
+may start a later planned wave as soon as that row's dependencies are verified,
+without waiting for unrelated work. Actual starts belong in `dispatch.json` and
+`status.log`; do not add a second schedule to this file.
 
-- Wave 1 (independent, launch together): 1.1.1, 1.1.2, 1.2.1
-- Wave 2 (after 1.2.1 is VERIFIED): 1.2.2
-
-This schedule is the plan, not a barrier: rolling dispatch may launch a later
-leaf the moment its own `Needs` are verified. Record actual launches in
-`status.log`, never here.
+Change `Needs`, `Owns`, `Tier`, or `Planned wave` only through a recorded plan
+amendment before that row launches; do not erase a dependency when it becomes
+satisfied. Update `State` in this table as work progresses. After parent
+re-verification and manual review, mark a leaf `VERIFIED`, release that exact
+leaf lease, and record the release. Do not promote a dependent until that exact
+release is recorded. For an abandoned leaf, record the handoff and confirm its
+worker has settled before releasing only that leaf; never call it
+parent-verified. Release the whole scope only after every leaf is settled and
+final scope verification has run. If final verification reports a handoff,
+record it before release and never describe the scope as complete.
 
 ## Status log
 
@@ -92,6 +110,7 @@ Append events to `.unlazy/<scope>/status.log`; do not copy the event history int
 ```text
 node <skill-dir>/scripts/gate-check.mjs --scope <scope> --log "leaf-1.1.1 dispatched"
 node <skill-dir>/scripts/gate-check.mjs --scope <scope> --log "leaf-1.1.1 verified"
+node <skill-dir>/scripts/gate-check.mjs --scope <scope> --log "leaf-1.1.1 lease released"
 ```
 
-Record contract amendments, plan changes, dispatch, parent verification, abandonment, branch integration, and lease release. Update the live State and Needs fields above when state changes; keep the log append-only. Before root completion, reread the current request and review every current inventory row against its owner and observing gate or manual review.
+Record contract amendments, plan changes, dispatch, parent verification, abandonment, branch integration, and lease release. Apply logged plan amendments and live State updates only in the dispatch table; keep the log append-only. Before root completion, reread the current request and review every current inventory row against its owner and observing gate or manual review.

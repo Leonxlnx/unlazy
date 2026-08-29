@@ -15,8 +15,8 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   UNLAZY_DIR, appendStatus, claimLeases, formatDocument, gateState,
-  hookStatePath, listScopes, parseGates, qualify, releaseLeases, resolveTarget,
-  scopeRoot, sha256, sleep, validateScopeId, withFileLock, writeAtomic,
+  hookStatePath, listScopes, parseGates, qualify, readStableRegularFile, releaseLeases,
+  resolveTarget, scopeRoot, sha256, sleep, validateScopeId, withFileLock, writeAtomic,
 } from "./lib/gates.mjs";
 import { terminateProcessTree } from "./lib/process-tree.mjs";
 import { dispatchStatus } from "./lib/dispatch.mjs";
@@ -62,6 +62,7 @@ const VALUE_OPTIONS = new Set([
 ]);
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const MAX_APPROVAL_BYTES = 256 * 1024;
+const MAX_GATE_LEDGER_BYTES = 8 * 1024 * 1024;
 const REGEX_TIMEOUT_MS = 250;
 const REGEX_STARTUP_TIMEOUT_MS = 5000;
 const MAX_REGEX_WORKERS = 4;
@@ -72,7 +73,7 @@ const CHECK_SUPERVISOR = fileURLToPath(new URL("./lib/check-supervisor.mjs", imp
 // to rewrite terminal history, set a window title, or visually reorder text.
 // Strip every C0/C1 control plus Unicode bidi formatting markers at the final
 // sink. Each console call still receives its own trailing newline.
-const UNSAFE_TERMINAL_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const UNSAFE_TERMINAL_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g;
 const terminalSafe = (value) => String(value).replace(UNSAFE_TERMINAL_RE, " ");
 for (const method of ["log", "error"]) {
   const write = console[method].bind(console);
@@ -224,14 +225,23 @@ if (action === "--bind") {
   }
 }
 
+if (target.discoveryErrors && target.discoveryErrors.length && action !== "--release") {
+  failUsage(target.discoveryErrors.join("; "));
+}
+
 if (!target.files.length && action !== "--release") {
   failUsage("no gate files found (looked for " + UNLAZY_DIR + "/<scope>/, then GATES.md and gates/*.md under " + root + ")");
 }
 
+const readLedgerFile = (file) => readStableRegularFile(file, {
+  ...(target.mode === "explicit" ? {} : { root }),
+  maxBytes: MAX_GATE_LEDGER_BYTES,
+  label: "gate ledger",
+});
+
 for (const file of target.files) {
-  try {
-    if (!statSync(file).isFile()) failUsage("gate target is not a regular file: " + file);
-  } catch (error) {
+  try { readLedgerFile(file); }
+  catch (error) {
     if (error.code === "ENOENT") failUsage("no such gate file: " + file);
     failUsage("cannot inspect gate file " + file + ": " + error.message);
   }
@@ -239,7 +249,7 @@ for (const file of target.files) {
 
 function loadLedger(file) {
   let text;
-  try { text = readFileSync(file, "utf8"); }
+  try { text = readLedgerFile(file); }
   catch (error) { failUsage("cannot read " + file + ": " + error.message); }
   const doc = parseGates(text);
   for (const warning of doc.warnings) console.error("gate-check: " + file + ": warning: " + warning);
@@ -283,7 +293,11 @@ if (action === "--claim" || action === "--release") {
   if (!result.ok) {
     if (result.error) failUsage(result.error);
     for (const conflict of result.conflicts) {
-      console.log("CONFLICT " + conflict.glob + " overlaps " + conflict.theirGlob + " held by " + conflict.with);
+      if (conflict.identity) {
+        console.log("CONFLICT " + conflict.with + " already holds a live lease; release it before claiming again");
+      } else {
+        console.log("CONFLICT " + conflict.glob + " overlaps " + conflict.theirGlob + " held by " + conflict.with);
+      }
     }
     console.log("CLAIM REFUSED (" + result.conflicts.length + " conflict(s))");
     process.exit(3);
@@ -781,7 +795,7 @@ for (const result of results) {
   if (!result.ok && !(opt.reverify && result.wasMet)) continue;
   try {
     await withFileLock(root, result.file, () => {
-      let doc = parseGates(readFileSync(result.file, "utf8"));
+      let doc = parseGates(readLedgerFile(result.file));
       if (doc.errors.length) throw new Error("fresh ledger became invalid: " + doc.errors.join("; "));
       const fresh = doc.gates.find((gate) => gate.id === result.gate.id);
       if (!fresh || signature(result.file, fresh) !== result.signature) {

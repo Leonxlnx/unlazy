@@ -39,9 +39,16 @@ Use `OPEN`, `VERIFIED`, or `ABANDONED` for branches. Store leaf ledgers as `gate
    node <skill-dir>/scripts/gate-check.mjs --scope <scope> --log "leaf-1.2.1 verified"
    ```
 
-   Mark the leaf `VERIFIED`, promote newly unblocked leaves from `WAITING` to `READY`, and dispatch them without waiting for unrelated in-flight leaves.
+   Mark the leaf `VERIFIED`, release that exact leaf lease, and record the release before promotion:
+
+   ```text
+   node <skill-dir>/scripts/gate-check.mjs --scope <scope> --leaf leaf-1.2.1 --release
+   node <skill-dir>/scripts/gate-check.mjs --scope <scope> --log "leaf-1.2.1 lease released"
+   ```
+
+   Only then promote newly unblocked leaves from `WAITING` to `READY` and dispatch them without waiting for unrelated in-flight leaves.
 7. **Integrate bottom-up.** Work each `node-*.md` ledger only after all named children return. Reverify the children, then run interface, end-to-end, and regression checks.
-8. **Reconcile, release, and report.** Reread the current request and review every current contract row. Missing/stale ownership or observation, abandonment, deferment, and owner decisions are non-completion. Release all scope leases after final verification. Report only when both the inventory and root ledger are met, then remeasure every reported count.
+8. **Reconcile, release, and report.** Reread the current request and review every current contract row. Missing/stale ownership or observation, abandonment, deferment, and owner decisions are non-completion. Release the whole scope only after every leaf has settled, every dispatch wave is terminal, branch and root ledgers have been reverified, and final aggregate verification has run. Scope-wide release before that point is reserved for explicit recovery after verifying the recorded owner is gone, never normal promotion. Report only when both the inventory and root ledger are met, then remeasure every reported count.
 
 ## Check concurrency
 
@@ -68,7 +75,8 @@ while an unverified leaf remains:
   wait for the next leaf to return
   record that return in its dispatch wave
   reverify that leaf and review its manual evidence
-  append status and update its declared state
+  append status and mark it VERIFIED
+  release that exact leaf lease and record the release
   promote each WAITING leaf whose Needs are all VERIFIED
 ```
 

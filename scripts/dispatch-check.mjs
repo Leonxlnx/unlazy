@@ -19,9 +19,39 @@ function usage() {
   ].join("\n");
 }
 
-function die(message) {
-  const safe = String(message).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
-  console.error("unlazy dispatch: " + safe);
+const UNSAFE_TERMINAL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
+const TRUNCATION_MARKER = "...[truncated]";
+function terminalSafe(value, maxBytes = 500) {
+  const pieces = [];
+  const sizes = [];
+  let bytes = 0;
+  let truncated = false;
+  for (const character of String(value)) {
+    let piece = character;
+    if (UNSAFE_TERMINAL.test(character)) {
+      const code = character.codePointAt(0);
+      piece = code <= 0xff
+        ? "\\x" + code.toString(16).padStart(2, "0")
+        : "\\u" + code.toString(16).padStart(4, "0");
+    }
+    const size = Buffer.byteLength(piece, "utf8");
+    if (bytes + size > maxBytes) { truncated = true; break; }
+    pieces.push(piece);
+    sizes.push(size);
+    bytes += size;
+  }
+  if (!truncated) return pieces.join("");
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+  while (pieces.length && bytes + markerBytes > maxBytes) {
+    pieces.pop();
+    bytes -= sizes.pop();
+  }
+  return pieces.join("") + TRUNCATION_MARKER;
+}
+
+function die(message, showUsage = false) {
+  console.error("unlazy dispatch: " + terminalSafe(message));
+  if (showUsage) console.error(usage());
   process.exit(2);
 }
 
@@ -31,7 +61,7 @@ if (!args.length || args[0] === "--help" || args[0] === "-h") {
 }
 
 const command = args.shift();
-if (!COMMANDS.has(command)) die("unknown command " + command + "\n" + usage());
+if (!COMMANDS.has(command)) die("unknown command " + command, true);
 
 const options = { root: process.cwd(), scope: null, wave: null, leaves: [], handle: null, reason: null };
 const single = new Set();
@@ -74,7 +104,7 @@ const summary = (wave, id) => {
   const returned = Object.keys(wave.returned).length;
   if (wave.state === "complete") return "COMPLETE " + id + " (" + returned + "/" + wave.leaves.length + " returned)";
   if (wave.state === "abandoned") return "ABANDONED " + id + " (" + started + "/" + wave.leaves.length +
-    " started, " + returned + "/" + wave.leaves.length + " returned): " + wave.reason;
+    " started, " + returned + "/" + wave.leaves.length + " returned): " + terminalSafe(wave.reason);
   return wave.state.toUpperCase() + " " + id + " (" + started + "/" + wave.leaves.length +
     " started, " + returned + "/" + wave.leaves.length + " returned)";
 };
@@ -86,7 +116,7 @@ try {
     process.exit(wave.state === "complete" ? 0 : 1);
   }
 
-  const wave = await updateDispatch(options.root, {
+  const { wave, logWarning } = await updateDispatch(options.root, {
     action: command,
     scope: options.scope,
     wave: options.wave,
@@ -95,6 +125,7 @@ try {
     handle: options.handle,
     reason: options.reason,
   });
+  if (logWarning) console.error("unlazy dispatch: warning: " + terminalSafe(logWarning));
   const started = Object.keys(wave.started).length;
   const returned = Object.keys(wave.returned).length;
   if (command === "open") console.log("OPEN " + options.wave + " (0/" + wave.leaves.length + " started, 0/" + wave.leaves.length + " returned)");

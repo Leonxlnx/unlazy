@@ -21,8 +21,7 @@
 //   CHECK: node scripts/gate-lint.mjs GATES.md
 //   EXPECT: LINT OK
 
-import { readFileSync } from "node:fs";
-import { parseGates } from "./lib/gates.mjs";
+import { parseGates, readStableRegularFile } from "./lib/gates.mjs";
 
 const HELP = `usage: gate-lint.mjs [--strict] [--json] <ledger.md ...>
 
@@ -33,6 +32,43 @@ activity instead of an outcome. Never executes a CHECK.
 exit codes: 0 no strict failures, 1 strict findings, 2 usage or parse error.`;
 
 const KNOWN_OPTIONS = new Set(["--strict", "--json", "--help", "-h"]);
+const MAX_GATE_LEDGER_BYTES = 8 * 1024 * 1024;
+const MAX_REPORTED_FINDINGS = 64;
+const MAX_REPORT_BYTES = 256 * 1024;
+const TRUNCATION_MARKER = "...[truncated]";
+
+// Findings and CLI diagnostics can contain repository-controlled filenames,
+// gate text, parser messages, or argv. Escape terminal controls at those data
+// boundaries instead of rewriting complete output, so help text, structural
+// newlines, and JSON indentation retain their intended formatting.
+const TERMINAL_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
+function terminalSafe(value, maxBytes = 1024) {
+  const pieces = [];
+  const sizes = [];
+  let bytes = 0;
+  let truncated = false;
+  for (const character of String(value)) {
+    let piece = character;
+    if (TERMINAL_CONTROL.test(character)) {
+      const code = character.codePointAt(0);
+      const prefix = code <= 0xff ? "\\x" : "\\u";
+      const width = code <= 0xff ? 2 : 4;
+      piece = prefix + code.toString(16).padStart(width, "0");
+    }
+    const size = Buffer.byteLength(piece, "utf8");
+    if (bytes + size > maxBytes) { truncated = true; break; }
+    pieces.push(piece);
+    sizes.push(size);
+    bytes += size;
+  }
+  if (!truncated) return pieces.join("");
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+  while (pieces.length && bytes + markerBytes > maxBytes) {
+    pieces.pop();
+    bytes -= sizes.pop();
+  }
+  return pieces.join("") + TRUNCATION_MARKER;
+}
 
 const args = process.argv.slice(2);
 if (!args.length) {
@@ -59,7 +95,7 @@ for (const arg of args) {
     continue;
   }
   if (!positional && arg.startsWith("-")) {
-    console.error("gate-lint: unknown option " + arg);
+    console.error("gate-lint: unknown option " + terminalSafe(arg, 512));
     console.error("run gate-lint.mjs --help for usage");
     process.exit(2);
   }
@@ -82,17 +118,36 @@ const WEAK_EXPECT = new Set([
 // Openings that name an activity rather than an outcome a stranger could judge.
 const ACTIVITY_START = /^(work(ing)? on|improve|enhance|handle|support|ensure|make sure|try|attempt|look (at|into)|investigate|consider|review|refactor|clean ?up|polish|update|tidy|address|deal with|add support)\b/i;
 const findings = [];
-const add = (file, level, gate, rule, message) =>
-  findings.push({ file, level, gate: gate || null, rule, message });
+let errorCount = 0;
+let warningCount = 0;
+let findingCount = 0;
+const add = (file, level, gate, rule, message) => {
+  findingCount++;
+  if (level === "error") errorCount++;
+  else if (level === "warn") warningCount++;
+  if (findings.length >= MAX_REPORTED_FINDINGS) return;
+  findings.push({
+    file: terminalSafe(file, 512),
+    level: terminalSafe(level, 16),
+    gate: gate ? terminalSafe(gate, 128) : null,
+    rule: terminalSafe(rule, 64),
+    message: terminalSafe(message, 1024),
+  });
+};
 
 let parseFailed = false;
 
 for (const file of files) {
   let text;
   try {
-    text = readFileSync(file, "utf8");
+    // Explicit lint targets may intentionally live outside the current
+    // working directory, so constrain file kind and size without a root.
+    text = readStableRegularFile(file, {
+      maxBytes: MAX_GATE_LEDGER_BYTES,
+      label: "gate ledger",
+    });
   } catch (error) {
-    console.error("gate-lint: cannot read " + file + ": " + error.message);
+    console.error("gate-lint: cannot read " + terminalSafe(file, 512) + ": " + terminalSafe(error.message, 1024));
     process.exit(2);
   }
 
@@ -146,17 +201,25 @@ for (const file of files) {
   }
 }
 
-const errors = findings.filter((f) => f.level === "error");
-const warnings = findings.filter((f) => f.level === "warn");
-const failed = errors.length > 0 || (strict && warnings.length > 0);
+const failed = errorCount > 0 || (strict && warningCount > 0);
 
 if (asJson) {
-  console.log(JSON.stringify({
+  const report = {
     ok: !failed,
-    errors: errors.length,
-    warnings: warnings.length,
-    findings,
-  }, null, 2));
+    errors: errorCount,
+    warnings: warningCount,
+    findings: [...findings],
+    truncated: findingCount > findings.length,
+    omittedFindings: findingCount - findings.length,
+  };
+  let output = JSON.stringify(report, null, 2);
+  while (Buffer.byteLength(output, "utf8") > MAX_REPORT_BYTES && report.findings.length) {
+    report.findings.pop();
+    report.truncated = true;
+    report.omittedFindings = findingCount - report.findings.length;
+    output = JSON.stringify(report, null, 2);
+  }
+  console.log(output);
 } else {
   let lastFile = null;
   for (const finding of findings) {
@@ -168,10 +231,12 @@ if (asJson) {
     const who = finding.gate ? finding.gate + ": " : "";
     console.log("  " + label + " " + who + finding.message + "  [" + finding.rule + "]");
   }
+  const omitted = findingCount - findings.length;
+  if (omitted) console.log("... [report truncated: " + omitted + " finding(s) omitted]");
   if (!failed) {
-    console.log(warnings.length ? "LINT OK (" + warnings.length + " warning(s))" : "LINT OK");
+    console.log(warningCount ? "LINT OK (" + warningCount + " warning(s))" : "LINT OK");
   } else {
-    console.log("LINT FINDINGS: " + errors.length + " error(s), " + warnings.length + " warning(s)");
+    console.log("LINT FINDINGS: " + errorCount + " error(s), " + warningCount + " warning(s)");
   }
 }
 

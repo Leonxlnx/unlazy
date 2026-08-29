@@ -62,7 +62,7 @@ node <skill-dir>/scripts/gate-check.mjs --scope api --leaf leaf-1.2.1 --claim
 
 Claiming checks all existing leases and writes the new lease while holding one global lease lock. Two simultaneous conflicting claims cannot both succeed. A claim is all-or-nothing.
 
-A scope/leaf label is itself exclusive while its lease exists. Repeating the same claim is refused; release that exact leaf before claiming it again. This prevents two workers dispatched with the same logical identity from both believing they own one lease.
+A scope/leaf label is itself exclusive while its lease exists. Repeating the same claim is refused even when the replacement paths are disjoint, and the refused attempt never rewrites the original lease's OWNS path set. Release that exact leaf before claiming it again. This prevents two workers dispatched with the same logical identity from both believing they own one lease.
 
 Lock directories contain JSON owner metadata. Unlazy deliberately does not auto-break an apparently stale lock, because deleting a live owner's path can let two successors enter at once. If a process dies while holding a lock, first verify that its recorded process is no longer running and that no unlazy operation could still own the lock, then remove only that specific abandoned lock manually. Never clear the whole lock directory while work is active. Approval-record locks use the same recovery rule.
 
@@ -79,10 +79,20 @@ Examples:
 
 Leases cover only declared paths and only participants that honor them. They are coordination records, not write isolation.
 
-Release a leaf or whole scope after parent verification:
+After parent re-verification and manual review, release only that exact leaf and
+record the release before promoting any dependent:
 
 ```text
 node <skill-dir>/scripts/gate-check.mjs --scope api --release --leaf leaf-1.2.1
+node <skill-dir>/scripts/gate-check.mjs --scope api --log "leaf-1.2.1 lease released"
+```
+
+Release the whole scope only after every leaf has settled, all dispatch waves
+are terminal, and branch, root, and final aggregate verification have run. The
+scope-wide form is otherwise only for explicit recovery after verifying the
+recorded owner is gone:
+
+```text
 node <skill-dir>/scripts/gate-check.mjs --scope api --release
 ```
 

@@ -2,8 +2,8 @@
 // Security, parser, execution, and writeback regressions. Zero dependencies.
 
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
-  readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync,
+  readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { execFile, spawnSync } from "node:child_process";
 import { delimiter, dirname, join, win32 } from "node:path";
@@ -50,6 +50,7 @@ function run(script, args, options = {}) {
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, ...(options.env || {}) },
+      timeout: options.timeoutMs,
     }, (error, stdout, stderr) => {
       done({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, out: (stdout || "") + (stderr || "") });
     });
@@ -63,6 +64,7 @@ function gateRun(s, args, options = {}) {
   return run(GATE_CHECK, actual, {
     cwd: s.dir,
     env: { UNLAZY_APPROVAL_DIR: s.approvals, ...(options.env || {}) },
+    timeoutMs: options.timeoutMs,
   });
 }
 
@@ -285,13 +287,18 @@ test("evidence: successful output is fingerprinted instead of persisted or echoe
   } finally { s.cleanup(); }
 });
 
-test("terminal: repository titles and diagnostics cannot emit controls or bidi overrides", async () => {
+test("terminal: repository titles and diagnostics cannot emit controls, line separators, or bidi overrides", async () => {
   const s = sandbox();
   try {
     s.write("GATES.md", "- [ ] G1: title\u001b]0;owned\u0007\u202eevil\n  EVIDENCE: pending\n");
     const status = await gateRun(s, ["--status"], { approve: false });
     assert(status.code === 1, status.out);
-    assert(!/[\u001b\u0007\u202e]/.test(status.out), "terminal controls survived status output");
+    assert(!/[\u001b\u0007\u2028\u2029\u202e]/.test(status.out), "terminal controls survived status output");
+
+    const cli = await gateRun(s, ["--bad-\u2028\u2029"], { approve: false });
+    assert(cli.code === 2, cli.out);
+    assert(!/[\u2028\u2029]/.test(cli.out), "line separators survived CLI diagnostics");
+    has(cli.out, "unknown option --bad-");
 
     s.write("bad.mjs", "console.error('failure\\u001b[31m red\\u001b[0m'); process.exitCode=1;\n");
     s.write("GATES.md", gate("G2", "controlled failure", "node bad.mjs", "NEVER"));
@@ -553,6 +560,63 @@ test("targeting: explicit files anchor relative commands and every positional fi
     has(result.out, "PASS leaf:G1");
     has(s.read("a/leaf.md"), "cwd=" + realpathSync(join(s.dir, "a")));
     has(s.read("b/leaf.md"), "cwd=" + realpathSync(join(s.dir, "b")));
+  } finally { s.cleanup(); }
+});
+
+test("targeting: discovered and explicit ledgers reject links and FIFOs without outside reads", async () => {
+  const s = sandbox();
+  try {
+    const outside = join(s.approvals, "outside.md");
+    writeFileSync(outside, "# Gates\n- [ ] X1: OUTSIDE_CANARY_7391\n  EVIDENCE: pending\n");
+    const assertClosed = async (args, label) => {
+      const started = Date.now();
+      const result = await gateRun(s, args, { approve: false, timeoutMs: 1500 });
+      assert(result.code === 2, label + " returned " + result.code + "\n" + result.out);
+      assert(Date.now() - started < 1800, label + " waited for an outer timeout");
+      lacks(result.out, "OUTSIDE_CANARY_7391", label);
+      return result;
+    };
+
+    const top = s.path("GATES.md");
+    linkSync(outside, top);
+    await assertClosed(["--status"], "hard-linked top ledger");
+    unlinkSync(top);
+
+    if (process.platform !== "win32") {
+      symlinkSync(outside, top);
+      await assertClosed(["--status"], "symlinked top ledger");
+      unlinkSync(top);
+
+      const made = spawnSync("mkfifo", [top], { encoding: "utf8" });
+      assert(made.status === 0, "could not create gate FIFO: " + made.stderr);
+      await assertClosed(["--status"], "FIFO top ledger");
+      unlinkSync(top);
+
+      const outsideGates = join(s.approvals, "outside-gates");
+      mkdirSync(outsideGates);
+      writeFileSync(join(outsideGates, "leaf.md"),
+        "# Gates\n- [ ] X2: OUTSIDE_CANARY_7391\n  EVIDENCE: pending\n");
+      symlinkSync(outsideGates, s.path("gates"));
+      await assertClosed(["--status"], "symlinked legacy gates directory");
+      unlinkSync(s.path("gates"));
+
+      mkdirSync(s.path(".unlazy/scoped"), { recursive: true });
+      symlinkSync(outside, s.path(".unlazy/scoped/GATES.md"));
+      await assertClosed(["--status", "--scope", "scoped"], "symlinked scoped top ledger");
+      unlinkSync(s.path(".unlazy/scoped/GATES.md"));
+
+      symlinkSync(outside, s.path("explicit.md"));
+      const explicit = await assertClosed(["--status", "explicit.md"], "explicit ledger symlink");
+      has(explicit.out, "regular single-link");
+      unlinkSync(s.path("explicit.md"));
+    }
+
+    rmSync(s.path(".unlazy"), { recursive: true, force: true });
+    s.write("GATES.md", "# Gates\n- [ ] C1: LOCAL_CONTROL_2864\n  EVIDENCE: pending\n");
+    const control = await gateRun(s, ["--status"], { approve: false });
+    assert(control.code === 1, "ordinary local gate control failed\n" + control.out);
+    has(control.out, "LOCAL_CONTROL_2864");
+    lacks(control.out, "OUTSIDE_CANARY_7391", "ordinary local gate control");
   } finally { s.cleanup(); }
 });
 

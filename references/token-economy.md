@@ -16,21 +16,26 @@ Spend model attention on implementation and judgment. Move repeated, determinist
 - Append events to `status.log`. Do not repeatedly regenerate a large plan when one line records the event.
 - Keep failure logs local and summarize only non-sensitive decisive facts when a manual report needs them; automatic success evidence already contains a digest and byte count.
 
-## Mark where reasoning matters, then let the router assign the model
+## Mark leaf reasoning needs without inventing host controls
 
-Unlazy decides *which* leaves need strong reasoning; it does not choose the model.
-Tag these as `Tier: judgment` in the PLAN dispatch table and leave the concrete
-model to the host's routing:
+`Tier` is planner metadata for execution leaves, not a model name or a routing
+guarantee:
 
-- contracts and architecture
-- security and compatibility boundaries
-- branch integration
-- manual high-risk gates
-- parent re-verification and final claim audit
+- Use `judgment` when the leaf's own artifact needs design, security or
+  compatibility reasoning, consequential manual review, or non-mechanical
+  verification.
+- Use `mechanical` only when the transformation pattern and acceptance gates are
+  already fixed.
 
-Everything else is `Tier: mechanical`, and only after its pattern and acceptance
-gates are fixed. Declaring the tier is unlazy's job; binding a tier to a model is
-the router's, so do not hard-code a model name in a leaf brief or in this skill.
+If the host exposes a documented model or reasoning control, the driver may map
+these tiers through that host-specific control at launch. If no such control is
+available, retain the tier as a briefing and review requirement and do not claim
+that a particular model or reasoning level was selected.
+
+Driver and branch duties are not leaf tiers. Contract and architecture work,
+dispatch decisions, parent re-verification, branch integration, and the final
+claim audit remain judgment responsibilities even when every execution leaf is
+mechanical.
 
 ## Avoid false economy
 

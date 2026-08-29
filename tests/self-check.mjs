@@ -39,6 +39,128 @@ const read = (p) => readFileSync(join(ROOT, p), "utf8");
 const checks = [];
 const check = (name, fn) => checks.push({ name, fn });
 
+function planStructureProblems(source) {
+  const problems = [];
+  const lines = source.split(/\r?\n/);
+  const section = (name) => {
+    const marker = "## " + name;
+    const starts = [];
+    for (let i = 0; i < lines.length; i++) if (lines[i].trim() === marker) starts.push(i);
+    if (starts.length !== 1) {
+      problems.push(marker + " occurs " + starts.length + " times");
+      return [];
+    }
+    let end = lines.length;
+    for (let i = starts[0] + 1; i < lines.length; i++) {
+      if (/^##\s+/.test(lines[i])) { end = i; break; }
+    }
+    return lines.slice(starts[0] + 1, end);
+  };
+  const cells = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return null;
+    return trimmed.slice(1, -1).split("|").map((cell) => cell.trim());
+  };
+
+  const table = section("Leaf dispatch table");
+  const headerIndex = table.findIndex((line) => /^\s*\|\s*Leaf\s*\|/.test(line));
+  const expectedHeader = ["Leaf", "Owns", "Needs", "Tier", "Planned wave", "State"];
+  const rows = [];
+  if (headerIndex < 0) {
+    problems.push("leaf dispatch table has no header");
+  } else {
+    const header = cells(table[headerIndex]);
+    if (JSON.stringify(header) !== JSON.stringify(expectedHeader)) {
+      problems.push("leaf dispatch header must be: " + expectedHeader.join(", "));
+    }
+    const separator = cells(table[headerIndex + 1] || "");
+    if (!separator || separator.length !== expectedHeader.length ||
+        separator.some((cell) => !/^:?-{3,}:?$/.test(cell))) {
+      problems.push("leaf dispatch table has an invalid separator");
+    }
+    for (let i = headerIndex + 2; i < table.length; i++) {
+      const row = cells(table[i]);
+      if (!row) {
+        if (rows.length && table[i].trim() === "") break;
+        continue;
+      }
+      rows.push(row);
+    }
+  }
+
+  const states = new Set(["WAITING", "READY", "IN-FLIGHT", "VERIFIED", "ABANDONED"]);
+  const tiers = new Set(["mechanical", "judgment"]);
+  const byId = new Map();
+  for (const row of rows) {
+    if (row.length !== expectedHeader.length) {
+      problems.push("leaf dispatch row has " + row.length + " cells: " + row.join(" | "));
+      continue;
+    }
+    const [id, owns, needsText, tier, waveText, state] = row;
+    if (!/^\d+(?:\.\d+)+$/.test(id)) problems.push("invalid leaf id: " + id);
+    if (byId.has(id)) problems.push("duplicate leaf row: " + id);
+    if (!owns || owns === "-") problems.push(id + " has no Owns paths");
+    if (!tiers.has(tier)) problems.push(id + " has invalid Tier: " + tier);
+    if (!/^[1-9]\d*$/.test(waveText)) problems.push(id + " has invalid Planned wave: " + waveText);
+    if (!states.has(state)) problems.push(id + " has invalid State: " + state);
+    const needs = needsText === "-" ? [] : needsText.split(",").map((value) => value.trim());
+    if (needs.some((value) => !/^\d+(?:\.\d+)+$/.test(value))) {
+      problems.push(id + " has invalid Needs: " + needsText);
+    }
+    byId.set(id, { needs, state, wave: Number(waveText) });
+  }
+  if (!rows.length) problems.push("leaf dispatch table has no rows");
+
+  for (const [id, row] of byId) {
+    let blocked = false;
+    for (const dependency of row.needs) {
+      const target = byId.get(dependency);
+      if (!target) {
+        problems.push(id + " needs unknown leaf " + dependency);
+        blocked = true;
+        continue;
+      }
+      if (dependency === id) problems.push(id + " depends on itself");
+      if (target.wave >= row.wave) problems.push(id + " is not planned after " + dependency);
+      if (target.state !== "VERIFIED") blocked = true;
+    }
+    if (row.state === "WAITING" && !blocked) problems.push(id + " is WAITING without a blocked dependency");
+    if (["READY", "IN-FLIGHT", "VERIFIED"].includes(row.state) && blocked) {
+      problems.push(id + " is " + row.state + " with a blocked dependency");
+    }
+  }
+
+  const tree = section("Tree");
+  const topologyLeaves = [];
+  for (const line of tree) {
+    if (!/^\s*-\s+\d/.test(line)) continue;
+    if (/\b(?:Owns|Needs|Tier|Wave|State)\b/i.test(line)) {
+      problems.push("tree repeats an operational field: " + line.trim());
+    }
+    const match = line.match(/^\s*-\s+(\d+(?:\.\d+)+)\s+<leaf>(?:\s|$)/);
+    if (match) topologyLeaves.push(match[1]);
+  }
+  const tableLeaves = [...byId.keys()].sort();
+  const treeLeaves = [...topologyLeaves].sort();
+  if (new Set(topologyLeaves).size !== topologyLeaves.length) problems.push("tree repeats a leaf id");
+  if (JSON.stringify(treeLeaves) !== JSON.stringify(tableLeaves)) {
+    problems.push("tree/table leaf sets differ: tree=" + treeLeaves.join(",") + " table=" + tableLeaves.join(","));
+  }
+
+  const scheduleHeadings = lines.filter((line) => line.trim() === "## Dispatch schedule").length;
+  if (scheduleHeadings) problems.push("separate dispatch schedule is forbidden");
+  if (lines.some((line) => /^\s*-\s*Wave\s+\d+/i.test(line))) {
+    problems.push("wave list duplicates Planned wave");
+  }
+  return problems;
+}
+
+function releasePrecedesPromotion(section, releaseToken, promoteToken) {
+  const release = section.indexOf(releaseToken);
+  const promote = section.indexOf(promoteToken);
+  return release !== -1 && promote !== -1 && release < promote;
+}
+
 check("zero non-stdlib imports", () => {
   const bad = [];
   for (const p of SCRIPTS) {
@@ -124,6 +246,83 @@ check("the PLAN template carries a revisioned contract denominator", () => {
   ];
   const missing = required.filter((token) => !plan.includes(token));
   return missing.length ? "PLAN contract inventory missing: " + missing.join(", ") : null;
+});
+
+check("the PLAN dispatch table is the single operational authority", () => {
+  const problems = planStructureProblems(read("templates/PLAN.md"));
+  return problems.length ? problems.join("; ") : null;
+});
+
+check("the PLAN structural check rejects contradictory representations", () => {
+  const plan = read("templates/PLAN.md");
+  const controls = [
+    ["blocked leaf marked READY", plan.replace(
+      "| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | 2 | WAITING |",
+      "| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | 2 | READY |")],
+    ["dependency in the same wave", plan.replace(
+      "| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | 2 | WAITING |",
+      "| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | 1 | WAITING |")],
+    ["unknown dependency", plan.replace(
+      "| 1.2.2 | src/<d>/**, tests/<d>/** | 1.2.1 | judgment | 2 | WAITING |",
+      "| 1.2.2 | src/<d>/**, tests/<d>/** | 9.9.9 | judgment | 2 | WAITING |")],
+    ["model name used as Tier", plan.replace(
+      "| 1.1.2 | src/<b>/**, tests/<b>/** | - | judgment | 1 | READY |",
+      "| 1.1.2 | src/<b>/**, tests/<b>/** | - | model-x | 1 | READY |")],
+    ["duplicate table row", plan.replace(
+      "| 1.1.2 | src/<b>/**, tests/<b>/** | - | judgment | 1 | READY |",
+      "| 1.1.2 | src/<b>/**, tests/<b>/** | - | judgment | 1 | READY |\n" +
+      "| 1.1.2 | src/<b>/**, tests/<b>/** | - | judgment | 1 | READY |")],
+    ["operational state copied into the tree", plan.replace(
+      "- 1.1.1 <leaf> ...... gates/leaf-1.1.1.md",
+      "- 1.1.1 <leaf> ...... gates/leaf-1.1.1.md ...... State: READY")],
+    ["separate schedule added", plan.replace(
+      "## Status log",
+      "## Dispatch schedule\n\n- Wave 1: 1.1.1\n\n## Status log")],
+  ];
+  for (const [name, control] of controls) {
+    if (control === plan) return "negative-control fixture no longer matches: " + name;
+    if (!planStructureProblems(control).length) return "negative control passed: " + name;
+  }
+  return null;
+});
+
+check("leaf release precedes dependent promotion everywhere", () => {
+  const orchestration = read("references/orchestration.md");
+  const stepStart = orchestration.indexOf("6. **Append status and roll forward.**");
+  const stepEnd = orchestration.indexOf("7. **Integrate bottom-up.**", stepStart);
+  const loopStart = orchestration.indexOf("while an unverified leaf remains:");
+  const loopEnd = orchestration.indexOf("```", loopStart);
+  const sections = [
+    ["driver step 6", orchestration.slice(stepStart, stepEnd),
+      "--leaf leaf-1.2.1 --release", "Only then promote"],
+    ["rolling dispatch loop", orchestration.slice(loopStart, loopEnd),
+      "release that exact leaf lease and record the release", "promote each WAITING leaf"],
+  ];
+  for (const [name, section, releaseToken, promoteToken] of sections) {
+    if (!releasePrecedesPromotion(section, releaseToken, promoteToken)) {
+      return name + " does not release the exact leaf before promotion";
+    }
+    const omitted = section.replace(releaseToken, "record the leaf result");
+    if (releasePrecedesPromotion(omitted, releaseToken, promoteToken)) {
+      return name + " missing-release negative control passed";
+    }
+  }
+  if (releasePrecedesPromotion("promote, then release", "release", "promote")) {
+    return "swapped-order negative control passed";
+  }
+  const parallel = read("references/parallel.md");
+  if (!parallel.includes("Release the whole scope only after every leaf has settled")) {
+    return "parallel guide does not reserve whole-scope release for final cleanup";
+  }
+  const plan = read("templates/PLAN.md");
+  if (!plan.includes("Do not promote a dependent until that exact\nrelease is recorded")) {
+    return "PLAN template does not gate promotion on the recorded exact release";
+  }
+  const skill = read("SKILL.md");
+  if (!skill.includes("parent-verified leaf's exact lease has been released")) {
+    return "SKILL.md rolling rule omits exact release";
+  }
+  return null;
 });
 
 check("request reconciliation keeps the focused solo cheap path", () => {
