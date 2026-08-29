@@ -240,4 +240,6 @@ if (asJson) {
   }
 }
 
-process.exit(parseFailed ? 2 : failed ? 1 : 0);
+// Let Node drain stdout before exiting. A forced process.exit() can truncate a
+// large report when stdout is an asynchronous POSIX pipe.
+process.exitCode = parseFailed ? 2 : failed ? 1 : 0;
