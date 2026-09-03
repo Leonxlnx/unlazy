@@ -28,3 +28,23 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Run zero-dependency test suite
         run: npm test
+
+  windows-node-22-14:
+    name: windows-latest / node 22.14.0 (libuv 1.49.2)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up affected Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.14.0
+      - name: Verify affected runtime and run zero-dependency test suite
+        shell: pwsh
+        run: |
+          if ((node -p "process.version") -ne "v22.14.0") { throw "wrong Node version" }
+          if ((node -p "process.versions.uv") -ne "1.49.2") { throw "wrong libuv version" }
+          npm test

@@ -12,6 +12,9 @@ import { fileURLToPath } from "node:url";
 import {
   terminateProcessTree, windowsTaskkillPath, WINDOWS_TASKKILL_TIMEOUT_MS,
 } from "../scripts/lib/process-tree.mjs";
+import {
+  automaticEvidencePrefix, gateDefinitionDigest, gateState, parseGates, sameFileIdentity,
+} from "../scripts/lib/gates.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GATE_CHECK = join(HERE, "..", "scripts", "gate-check.mjs");
@@ -99,6 +102,121 @@ async function waitForProcessExit(pid, timeoutMs = 5000) {
   }
 }
 
+test("windows identity: same-file comparison stays strict across device and inode controls", () => {
+  // The affected Windows path compares fstat from the original descriptor to
+  // fstat from a second descriptor opened from the current named path. This
+  // pure control ensures no platform exception can reduce identity to ino.
+  assert(sameFileIdentity({ dev: 7, ino: 11 }, { dev: 7, ino: 11 }),
+    "equal descriptor identities were rejected");
+  assert(!sameFileIdentity({ dev: 7, ino: 11 }, { dev: 8, ino: 11 }),
+    "equal inode with a different device was accepted");
+  assert(!sameFileIdentity({ dev: 7, ino: 11 }, { dev: 7, ino: 12 }),
+    "a different inode on the same device was accepted");
+});
+
+test("approval: directory identity snapshots retain BigInt precision", () => {
+  const highInode = 18014398509496404n;
+  assert(Number(highInode) === Number(highInode + 1n),
+    "high-inode precision control no longer demonstrates Number aliasing");
+  assert(!sameFileIdentity({ dev: 7n, ino: highInode }, { dev: 7n, ino: highInode + 1n }),
+    "distinct high BigInt inodes were accepted after Number precision would collide");
+  // Portable filesystems cannot promise adjacent >2^53 inode fixtures. Lock
+  // the three real approval-store acquisition sites to BigInt while the pure
+  // alias control above proves why Number snapshots are insufficient.
+  const checkerSource = readFileSync(GATE_CHECK, "utf8");
+  for (const acquisition of [
+    "lstatSync(approvalDir, { bigint: true })",
+    "lstatSync(canonical, { bigint: true })",
+    "lstatSync(store.path, { bigint: true })",
+  ]) has(checkerSource, acquisition, "approval-directory implementation");
+  has(checkerSource, "sameFileIdentity(current, store)", "approval-directory implementation");
+});
+
+test("definition digest: golden vector and stale evidence state table are exact", () => {
+  const parsed = parseGates([
+    "- [x] G1: digest fixture",
+    "  CHECK: printf \"token-b\\n\"",
+    "  EXPECT: token-c",
+    "  EVIDENCE: pending",
+    "",
+  ].join("\n"));
+  assert(!parsed.errors.length, parsed.errors.join("; "));
+  const runnable = parsed.gates[0];
+  const digest = gateDefinitionDigest(runnable);
+  assert(digest === "544a096dd6735f1168b04cb00c40b2d7d8889c656e383d95ee6977ea90813ab5",
+    "definition digest golden vector changed: " + digest);
+  const prefix = automaticEvidencePrefix(digest);
+  const state = (evidence, gateValue = runnable) =>
+    gateState({ ...gateValue, checked: true, evidence }, new Map());
+  const successHeader = prefix + " exit=0; EXPECT=matched; output-sha256=" + "a".repeat(64) +
+    "; output-bytes=0;";
+
+  assert(state(successHeader + " shell=opaque automatic-evidence=v99; definition-sha256=bad") === "met",
+    "marker-like opaque transcript text invalidated an exact prefix");
+  const malformed = [
+    null,
+    "",
+    "pending",
+    "human review from an old writer",
+    "exit=0; shell=/bin/sh; cwd=/tmp",
+    "automatic-evidence=v1; definition-sha256=",
+    "automatic-evidence=v1; definition-sha256=" + digest.slice(0, 63) + ";",
+    "automatic-evidence=v1; definition-sha256=" + digest + "0;",
+    "automatic-evidence=v1; definition-sha256=" + "g".repeat(64) + ";",
+    "automatic-evidence=v1; definition-sha256=" + digest.toUpperCase() + ";",
+    "automatic-evidence=v2; definition-sha256=" + digest + ";",
+    "ordinary text; automatic-evidence=v1; definition-sha256=" + digest + ";",
+    prefix,
+    prefix + " garbage",
+    prefix + " exit=1; EXPECT=not matched; output-sha256=" + "a".repeat(64) + "; output-bytes=0;",
+    prefix + " exit=0; EXPECT=matched; output-sha256=short; output-bytes=0;",
+    prefix + " exit=0; EXPECT=matched; output-sha256=" + "A".repeat(64) + "; output-bytes=0;",
+    prefix + " exit=0; EXPECT=matched; output-sha256=" + "a".repeat(64) + "; output-bytes=01;",
+    successHeader,
+    successHeader + " garbage",
+    successHeader + " shell=",
+    prefix + " exit=0; EXPECT=matched; output-sha256=" + "a".repeat(64) +
+      "; output-bytes=1048577; shell=/bin/sh",
+    prefix + " exit=0; EXPECT=matched; output-sha256=" + "a".repeat(64) +
+      "; output-bytes=" + "9".repeat(10000) + "; shell=/bin/sh",
+    successHeader + " shell=/bin/sh" + "x".repeat(901),
+  ];
+  for (const evidence of malformed) {
+    assert(state(evidence) === "stale-unmet",
+      "legacy or malformed runnable evidence was accepted: " + JSON.stringify(evidence));
+  }
+  assert(state("reviewed by owner") === "stale-unmet",
+    "manual-to-runnable transition reused human evidence");
+
+  const explicitCwd = { ...runnable, cwd: "." };
+  assert(gateDefinitionDigest(explicitCwd) !== digest, "omitted CWD and explicit CWD: . collided");
+  assert(gateDefinitionDigest({ ...runnable, id: "RENAMED", title: "copy edited" }) === digest,
+    "id or title changed the environment-independent definition digest");
+  const crlf = parseGates([
+    "- [x] OTHER: another title",
+    "  EXPECT: token-c",
+    "  CHECK: printf \"token-b\\n\"",
+    "  EVIDENCE: pending",
+    "",
+  ].join("\r\n"));
+  assert(gateDefinitionDigest(crlf.gates[0]) === digest,
+    "attribute order or CRLF changed definition semantics");
+
+  const manual = { id: "M1", checked: true, check: null, expect: null, cwd: null };
+  for (const evidence of ["reviewed by owner", "measured 7 rows", "ordinary; automatic-evidence=v9"] ) {
+    assert(state(evidence, manual) === "met", "ordinary manual evidence lost compatibility");
+  }
+  assert(state("pending", manual) === "unmet-no-evidence", "manual pending evidence became met");
+  assert(state(prefix + " exit=0", manual) === "stale-unmet",
+    "runnable-to-manual v1 evidence became human attestation");
+  assert(state("exit=0; shell=/bin/sh", manual) === "stale-unmet",
+    "runnable-to-manual legacy evidence became human attestation");
+  assert(gateState({ ...runnable, checked: false, evidence: successHeader }, new Map()) === "unmet",
+    "unchecked current evidence became met");
+  assert(gateState({ ...runnable, evidence: "legacy" }, new Map([[runnable.id, "handoff"]])) ===
+    "abandoned", "abandonment did not override stale evidence");
+});
+
 test("approval: status is read-only and an unapproved CHECK is printed but not run", async () => {
   const s = sandbox();
   try {
@@ -114,10 +232,13 @@ test("approval: status is read-only and an unapproved CHECK is printed but not r
     has(denied.out, "APPROVAL REQUIRED GATES:G1");
     has(denied.out, "NOT RUN");
     assert(!s.path("ran.txt") || !await fileExists(s.path("ran.txt")), "unapproved CHECK executed");
-    s.write("GATES.md", "- [x] G1: claimed\n  CHECK: node check.mjs\n  EXPECT: OK\n  EVIDENCE: claimed\n");
-    const unverified = await gateRun(s, ["--reverify"], { approve: false });
+    const approved = await gateRun(s, []);
+    assert(approved.code === 0, approved.out);
+    const currentLedger = s.read("GATES.md");
+    const unverified = await gateRun(s, ["--reverify", "--timeout", "121"], { approve: false });
     assert(unverified.code === 1, "unapproved reverify must not certify existing evidence\n" + unverified.out);
     has(unverified.out, "GATES:G1 (reverify not run)");
+    assert(s.read("GATES.md") === currentLedger, "unapproved reverify changed current evidence");
   } finally { s.cleanup(); }
 });
 
@@ -222,6 +343,36 @@ test("approval: a FIFO record is rejected without blocking or executing", async 
   } finally { s.cleanup(); }
 });
 
+test("approval: a hard-linked existing record is rejected without executing or mutation", async () => {
+  const s = sandbox();
+  try {
+    s.write("marker.mjs", [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync('runs.log', 'run\\n');",
+      "console.log('OK');",
+      "",
+    ].join("\n"));
+    s.write("GATES.md", gate("G1", "single-link approval", "node marker.mjs", "OK"));
+    const seed = await gateRun(s, []);
+    assert(seed.code === 0, seed.out);
+    const token = readdirSync(s.approvals).find((name) => name.endsWith(".json"));
+    assert(token, "approval token was not created");
+    const tokenPath = join(s.approvals, token);
+    const original = readFileSync(tokenPath, "utf8");
+    linkSync(tokenPath, join(s.approvals, "linked-sibling.json"));
+    s.write("GATES.md", gate("G1", "single-link approval", "node marker.mjs", "OK"));
+    const runsBefore = s.read("runs.log");
+
+    const replay = await gateRun(s, [], { approve: false });
+    assert(replay.code === 2, "hard-linked approval returned " + replay.code + "\n" + replay.out);
+    has(replay.out, "could not validate approval");
+    assert(s.read("runs.log") === runsBefore, "hard-linked approval authorized CHECK execution");
+    assert(readFileSync(tokenPath, "utf8") === original, "approval record bytes changed");
+    assert(readFileSync(join(s.approvals, "linked-sibling.json"), "utf8") === original,
+      "hard-link sibling bytes changed");
+  } finally { s.cleanup(); }
+});
+
 test("shell: resolution and PATH context are visible, invalid overrides are usage errors", async () => {
   const s = sandbox();
   try {
@@ -232,7 +383,7 @@ test("shell: resolution and PATH context are visible, invalid overrides are usag
     has(good.out, "shell=");
     has(good.out, "PATH=");
     const ledger = s.read("GATES.md");
-    has(ledger, "exit=0; shell=");
+    has(ledger, "; shell=");
     has(ledger, "; path=");
     s.write("GATES.md", gate("G1", "shell", "node ok.mjs", "SHELL-OK"));
     const bad = await gateRun(s, ["--shell", "definitely-missing-shell"], { approve: false });
@@ -287,6 +438,160 @@ test("evidence: successful output is fingerprinted instead of persisted or echoe
   } finally { s.cleanup(); }
 });
 
+test("evidence binding: status is environment-independent and stale reruns repair or demote", async () => {
+  const s = sandbox();
+  try {
+    s.write("run-a.mjs", [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync('runs.log', 'A\\n');",
+      "console.log('TOKEN-A');",
+      "",
+    ].join("\n"));
+    s.write("run-b.mjs", [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync('runs.log', 'B\\n');",
+      "console.log('TOKEN-B');",
+      "",
+    ].join("\n"));
+    s.write("GATES.md", gate("G1", "bound evidence", "node run-a.mjs", "TOKEN-A"));
+
+    const initial = await gateRun(s, []);
+    assert(initial.code === 0, initial.out);
+    let ledger = s.read("GATES.md");
+    const firstDigest = (ledger.match(/definition-sha256=([a-f0-9]{64});/) || [])[1];
+    assert(firstDigest, "fresh automatic evidence lacks a full definition digest\n" + ledger);
+    has(ledger, "EVIDENCE: automatic-evidence=v1; definition-sha256=" + firstDigest + "; exit=0;");
+
+    const approvalsBeforeStatus = readdirSync(s.approvals).sort().join("\n");
+    const ledgerBeforeStatus = ledger;
+    const runsBeforeStatus = s.read("runs.log");
+    const poisonedApprovalPath = s.path("repository-approval-path");
+    const status = await gateRun(s, ["--status"], {
+      approve: false,
+      env: {
+        PATH: "",
+        UNLAZY_SHELL: "definitely-missing-shell",
+        UNLAZY_APPROVAL_DIR: poisonedApprovalPath,
+      },
+    });
+    assert(status.code === 0, "environment-independent status failed\n" + status.out);
+    has(status.out, "ALL MET (1 met)");
+    assert(s.read("GATES.md") === ledgerBeforeStatus, "status changed current ledger bytes");
+    assert(s.read("runs.log") === runsBeforeStatus, "status executed CHECK");
+    assert(readdirSync(s.approvals).sort().join("\n") === approvalsBeforeStatus,
+      "status changed approval storage");
+    assert(!existsSync(poisonedApprovalPath), "status initialized repository approval storage");
+
+    // A changed CHECK cannot borrow the old runtime approval. Its retained v1
+    // evidence is stale, and a failing approved rerun must clear both the box
+    // and the stale evidence instead of leaving a visually green ledger.
+    s.write("GATES.md", ledger.replace("CHECK: node run-a.mjs", "CHECK: node run-b.mjs"));
+    const staleBytes = s.read("GATES.md");
+    const staleStatus = await gateRun(s, ["--status"], { approve: false });
+    assert(staleStatus.code === 1, staleStatus.out);
+    has(staleStatus.out, "checked but automatic evidence is stale or unbound");
+    assert(s.read("GATES.md") === staleBytes, "stale status rewrote evidence");
+    const denied = await gateRun(s, [], { approve: false });
+    assert(denied.code === 1, denied.out);
+    has(denied.out, "APPROVAL REQUIRED GATES:G1");
+    assert(s.read("runs.log") === runsBeforeStatus, "unapproved edited CHECK executed");
+    const failed = await gateRun(s, []);
+    assert(failed.code === 1, failed.out);
+    has(failed.out, "FAIL GATES:G1");
+    ledger = s.read("GATES.md");
+    has(ledger, "- [ ] G1: bound evidence");
+    has(ledger, "  EVIDENCE: pending\n");
+    lacks(ledger, "automatic-evidence=", "failed stale rerun ledger");
+
+    // Retain the old A digest while changing the definition to a passing B
+    // oracle. Approval and execution replace it with the exact new digest.
+    s.write("GATES.md", ledgerBeforeStatus
+      .replace("CHECK: node run-a.mjs", "CHECK: node run-b.mjs")
+      .replace("EXPECT: TOKEN-A", "EXPECT: TOKEN-B"));
+    const repaired = await gateRun(s, []);
+    assert(repaired.code === 0, repaired.out);
+    has(repaired.out, "PASS GATES:G1");
+    ledger = s.read("GATES.md");
+    const secondDigest = (ledger.match(/definition-sha256=([a-f0-9]{64});/) || [])[1];
+    assert(secondDigest && secondDigest !== firstDigest, "edited pass did not replace the definition digest");
+
+    // Raw omitted CWD versus `.` changes structural currentness, but both
+    // resolve to the same runtime oracle. The independent exact approval may
+    // therefore be reused while the check still reruns and refreshes evidence.
+    const approvalsBeforeCwd = readdirSync(s.approvals).sort().join("\n");
+    s.write("GATES.md", ledger.replace("  EVIDENCE:", "  CWD: .\n  EVIDENCE:"));
+    const cwdStatus = await gateRun(s, ["--status"], { approve: false });
+    assert(cwdStatus.code === 1, cwdStatus.out);
+    const cwdRepair = await gateRun(s, [], { approve: false });
+    assert(cwdRepair.code === 0, cwdRepair.out);
+    has(cwdRepair.out, "RUN  GATES:G1");
+    lacks(cwdRepair.out, "APPROVAL REQUIRED", "same-runtime CWD repair");
+    assert(readdirSync(s.approvals).sort().join("\n") === approvalsBeforeCwd,
+      "same resolved CWD created a different runtime approval");
+    ledger = s.read("GATES.md");
+    const cwdDigest = (ledger.match(/definition-sha256=([a-f0-9]{64});/) || [])[1];
+    assert(cwdDigest && cwdDigest !== secondDigest, "raw CWD edit did not change the definition digest");
+
+    // Legacy and malformed automatic evidence are valid ledger syntax but
+    // stale state. A passing run migrates either form to one canonical prefix.
+    for (const legacyEvidence of [
+      "exit=0; shell=old-writer",
+      "automatic-evidence=v1; definition-sha256=short; exit=0",
+      "automatic-evidence=v2; definition-sha256=" + cwdDigest + "; exit=0",
+      "automatic-evidence=v1; definition-sha256=" + cwdDigest + ";",
+      "automatic-evidence=v1; definition-sha256=" + cwdDigest +
+        "; exit=1; EXPECT=not matched; output-sha256=" + "a".repeat(64) + "; output-bytes=0;",
+    ]) {
+      s.write("GATES.md", ledger.replace(/EVIDENCE: .*$/m, "EVIDENCE: " + legacyEvidence));
+      const legacyStatus = await gateRun(s, ["--status"], { approve: false });
+      assert(legacyStatus.code === 1, legacyStatus.out);
+      const migrated = await gateRun(s, [], { approve: false });
+      assert(migrated.code === 0, migrated.out);
+      ledger = s.read("GATES.md");
+      has(ledger, "EVIDENCE: automatic-evidence=v1; definition-sha256=" + cwdDigest + ";");
+    }
+
+    // Simulate an older writer overwriting current evidence, then let the
+    // already-approved current definition fail. The stale transcript cannot
+    // survive the failed rerun.
+    s.write("run-b.mjs", "console.log('WRONG');\n");
+    s.write("GATES.md", ledger.replace(/EVIDENCE: .*$/m, "EVIDENCE: legacy writer transcript"));
+    const legacyFailure = await gateRun(s, [], { approve: false });
+    assert(legacyFailure.code === 1, legacyFailure.out);
+    const demoted = s.read("GATES.md");
+    has(demoted, "- [ ] G1: bound evidence");
+    assert((demoted.match(/EVIDENCE:/g) || []).length === 1, "failure duplicated evidence lines");
+    has(demoted, "EVIDENCE: pending");
+    lacks(demoted, "legacy writer transcript", "failed legacy rerun ledger");
+  } finally { s.cleanup(); }
+});
+
+test("evidence binding: long runtime transcript cannot truncate definition or output digests", async () => {
+  if (process.platform === "win32") return;
+  const s = sandbox();
+  try {
+    const deep = Array.from({ length: 22 }, (_, index) =>
+      "segment-" + String(index).padStart(2, "0") + "-" + "x".repeat(18)).join("/");
+    s.write(deep + "/check.mjs", "console.log('LONG-OK');\n");
+    const absoluteNode = JSON.stringify(process.execPath);
+    s.write("GATES.md", gate("G1", "long evidence transcript", absoluteNode + " check.mjs", "LONG-OK",
+      "  CWD: " + deep + "\n"));
+    const longPath = Array(120).fill(dirname(process.execPath)).join(delimiter);
+    const result = await gateRun(s, [], { env: { PATH: longPath } });
+    assert(result.code === 0, result.out);
+    const evidenceLine = s.read("GATES.md").split(/\r?\n/).find((line) => line.includes("EVIDENCE:"));
+    assert(evidenceLine.length <= "  EVIDENCE: ".length + 900,
+      "evidence cap was exceeded: " + evidenceLine.length);
+    assert(/^  EVIDENCE: automatic-evidence=v1; definition-sha256=[a-f0-9]{64};/.test(evidenceLine),
+      "long transcript truncated the definition digest\n" + evidenceLine);
+    has(evidenceLine, "output-sha256=");
+    assert(/output-sha256=[a-f0-9]{64}; output-bytes=\d+;/.test(evidenceLine),
+      "long transcript truncated the output fingerprint\n" + evidenceLine);
+    assert(evidenceLine.indexOf("output-sha256=") < evidenceLine.indexOf("; shell="),
+      "unbounded transcript preceded the output fingerprint");
+  } finally { s.cleanup(); }
+});
+
 test("terminal: repository titles and diagnostics cannot emit controls, line separators, or bidi overrides", async () => {
   const s = sandbox();
   try {
@@ -312,20 +617,29 @@ test("terminal: repository titles and diagnostics cannot emit controls, line sep
 test("reverify: a stale success is demoted and a reproducible success stays met", async () => {
   const s = sandbox();
   try {
-    s.write("bad.mjs", "console.log('WRONG');\n");
-    s.write("GATES.md", "- [x] G1: forged\n  CHECK: node bad.mjs\n  EXPECT: RIGHT\n  EVIDENCE: forged\n");
+    s.write("check.mjs", "console.log('RIGHT');\n");
+    s.write("GATES.md", gate("G1", "real", "node check.mjs", "RIGHT"));
+    const initial = await gateRun(s, []);
+    assert(initial.code === 0, initial.out);
+    const verified = await gateRun(s, ["--reverify"]);
+    assert(verified.code === 0, verified.out);
+    has(verified.out, "reverified: 1");
+    const historical = s.read("GATES.md");
+    s.write("check.mjs", "console.log('WRONG');\n");
     const plain = await gateRun(s, []);
     assert(plain.code === 0, plain.out);
+    has(plain.out, "ALL MET");
+    assert(s.read("GATES.md") === historical,
+      "normal mode rewrote current evidence after only a transitive input changed");
     const failed = await gateRun(s, ["--reverify"]);
     assert(failed.code === 1, failed.out);
     has(failed.out, "FAIL GATES:G1");
     has(s.read("GATES.md"), "- [ ] G1");
     has(s.read("GATES.md"), "EVIDENCE: pending");
-    s.write("good.mjs", "console.log('RIGHT');\n");
-    s.write("GATES.md", "- [x] G1: real\n  CHECK: node good.mjs\n  EXPECT: RIGHT\n  EVIDENCE: RIGHT\n");
+    s.write("check.mjs", "console.log('RIGHT');\n");
     const passed = await gateRun(s, ["--reverify"]);
     assert(passed.code === 0, passed.out);
-    has(passed.out, "reverified: 1");
+    has(passed.out, "PASS GATES:G1");
   } finally { s.cleanup(); }
 });
 
@@ -342,8 +656,27 @@ test("parser: fenced examples are ignored and CRLF plus missing EVIDENCE are pre
     lacks(result.out, "BAD:");
     const after = s.read("GATES.md");
     has(after, "- [x] G1: real\r\n");
-    has(after, "EVIDENCE: exit=0;");
+    has(after, "EVIDENCE: automatic-evidence=v1; definition-sha256=");
+    has(after, "; exit=0; EXPECT=matched; output-sha256=");
+    has(after, "; shell=");
     assert(!/(^|[^\r])\n/.test(after), "write introduced bare LF");
+    const currentStatus = await gateRun(s, ["--status"], { approve: false });
+    assert(currentStatus.code === 0, currentStatus.out);
+    assert(s.read("GATES.md") === after, "CRLF status changed ledger bytes");
+
+    s.write("ok.mjs", "console.log('NEXT');\n");
+    s.write("GATES.md", after.replace("  EXPECT: OK\r\n", "  EXPECT: NEXT\r\n"));
+    const staleCrlf = s.read("GATES.md");
+    const staleStatus = await gateRun(s, ["--status"], { approve: false });
+    assert(staleStatus.code === 1, staleStatus.out);
+    has(staleStatus.out, "automatic evidence is stale or unbound");
+    assert(s.read("GATES.md") === staleCrlf, "stale CRLF status changed ledger bytes");
+    const repaired = await gateRun(s, []);
+    assert(repaired.code === 0, repaired.out);
+    const repairedCrlf = s.read("GATES.md");
+    has(repairedCrlf, "- [x] G1: real\r\n");
+    has(repairedCrlf, "  EXPECT: NEXT\r\n");
+    assert(!/(^|[^\r])\n/.test(repairedCrlf), "CRLF stale repair introduced bare LF");
   } finally { s.cleanup(); }
 });
 
@@ -449,6 +782,87 @@ test("execution: output is capped and overflow cannot certify a gate", async () 
   } finally { s.cleanup(); }
 });
 
+test("output representation: exact-cap split streams and invalid UTF-8 enforce canonical cap", async () => {
+  const s = sandbox();
+  try {
+    s.write("single-cap.mjs", "process.stdout.write('a'.repeat(1048576));\n");
+    s.write("GATES.md", gate("G1", "single stream exact cap", "node single-cap.mjs", "a"));
+    let result = await gateRun(s, []);
+    assert(result.code === 0, "exact-cap single stream failed\n" + result.out.slice(-2000));
+    has(result.out, "PASS GATES:G1");
+    has(result.out, "bytes=1048576");
+    let ledger = s.read("GATES.md");
+    has(ledger, "output-bytes=1048576;");
+    let status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 0, "exact-cap evidence became stale\n" + status.out);
+
+    // Two raw streams may total one byte less than the raw ceiling because the
+    // canonical matcher inserts one byte between them. That exact normalized
+    // boundary is still a valid success and must remain current in status.
+    s.write("split-boundary.mjs",
+      "process.stdout.write('a'.repeat(524287)); process.stderr.write('b'.repeat(524288));\n");
+    s.write("GATES.md", gate("G1", "split streams normalized exact cap", "node split-boundary.mjs", "a"));
+    result = await gateRun(s, []);
+    assert(result.code === 0, "exact normalized split-stream boundary failed\n" + result.out.slice(-2000));
+    has(result.out, "PASS GATES:G1");
+    has(result.out, "bytes=1048576");
+    ledger = s.read("GATES.md");
+    has(ledger, "output-bytes=1048576;");
+    status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 0, "split-stream boundary evidence became stale\n" + status.out);
+
+    // v1 fingerprints the exact decoded string used for EXPECT. A single
+    // invalid byte therefore hashes as UTF-8 U+FFFD (three bytes).
+    s.write("invalid-small.mjs", "process.stdout.write(Buffer.from([255]));\n");
+    s.write("GATES.md", gate("G1", "small invalid UTF-8", "node invalid-small.mjs", "\uFFFD"));
+    result = await gateRun(s, []);
+    assert(result.code === 0, "small invalid UTF-8 control failed\n" + result.out);
+    has(result.out, "sha256=83d544ccc223c057d2bf80d3f2a32982c32c3c0db8e2674820da5064783fb097; bytes=3");
+    ledger = s.read("GATES.md");
+    has(ledger, "output-sha256=83d544ccc223c057d2bf80d3f2a32982c32c3c0db8e2674820da5064783fb097;");
+    has(ledger, "output-bytes=3;");
+
+    s.write("invalid-boundary.mjs", [
+      "const output = Buffer.concat([Buffer.alloc(349525, 255), Buffer.from('a')]);",
+      "process.stdout.write(output);",
+      "",
+    ].join("\n"));
+    s.write("GATES.md", gate("G1", "invalid UTF-8 normalized exact cap", "node invalid-boundary.mjs", "a"));
+    result = await gateRun(s, []);
+    assert(result.code === 0, "invalid UTF-8 exact normalized boundary failed\n" + result.out.slice(-2000));
+    has(result.out, "PASS GATES:G1");
+    has(result.out, "bytes=1048576");
+    ledger = s.read("GATES.md");
+    has(ledger, "output-bytes=1048576;");
+    status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 0, "invalid UTF-8 boundary evidence became stale\n" + status.out);
+
+    const assertCanonicalOverflow = async (script, source, label) => {
+      s.write(script, source);
+      s.write("GATES.md", gate("G1", label, "node " + script, "a"));
+      const failed = await gateRun(s, []);
+      assert(failed.code === 1, label + " returned " + failed.code + "\n" + failed.out.slice(-2000));
+      has(failed.out, "FAIL GATES:G1");
+      has(failed.out, "output exceeded 1048576 bytes after stdout/stderr UTF-8 combination");
+      lacks(failed.out, "PASS GATES:G1", label);
+      lacks(failed.out, "ALL MET", label);
+      const failedLedger = s.read("GATES.md");
+      has(failedLedger, "- [ ] G1:");
+      has(failedLedger, "EVIDENCE: pending");
+      lacks(failedLedger, "automatic-evidence=", label + " ledger");
+      const failedStatus = await gateRun(s, ["--status"], { approve: false });
+      assert(failedStatus.code === 1, label + " status returned " + failedStatus.code + "\n" + failedStatus.out);
+    };
+
+    await assertCanonicalOverflow("split-cap.mjs",
+      "process.stdout.write('a'.repeat(524288)); process.stderr.write('b'.repeat(524288));\n",
+      "split streams at raw cap");
+    await assertCanonicalOverflow("invalid-cap.mjs",
+      "process.stdout.write(Buffer.concat([Buffer.alloc(349525,255),Buffer.from('ab')]));\n",
+      "invalid UTF-8 expansion beyond normalized cap");
+  } finally { s.cleanup(); }
+});
+
 test("jobs: rolling concurrency is opt-in and output stays in gate order", async () => {
   const s = sandbox();
   try {
@@ -513,10 +927,52 @@ test("reverify: a stale in-flight result cannot leave old evidence falsely green
     const result = await running;
     assert(result.code === 1, "stale reverify returned " + result.code + "\n" + result.out);
     has(result.out, "STALE GATES:G1");
-    has(result.out, "GATES:G1 (stale result discarded)");
     lacks(result.out, "ALL MET");
     lacks(result.out, "reverified: 1");
     assert(s.read("GATES.md").includes("EXPECT: NEW\n  EVIDENCE: old evidence"), "newer ledger was clobbered");
+  } finally { s.cleanup(); }
+});
+
+test("writeback: same-definition stale pass and fail races are last-writer-wins", async () => {
+  const s = sandbox();
+  try {
+    s.write("race.mjs", [
+      "const delay = Number(process.env.RACE_DELAY || 0);",
+      "setTimeout(() => console.log(process.env.RACE_OUTCOME === 'pass' ? 'RACE-OK' : 'WRONG'), delay);",
+      "",
+    ].join("\n"));
+    s.write("GATES.md", gate("G1", "serialized stale race", "node race.mjs", "RACE-OK"));
+    const seed = await gateRun(s, [], { env: { RACE_OUTCOME: "pass", RACE_DELAY: "0" } });
+    assert(seed.code === 0, seed.out);
+
+    const makeStaleChecked = () => s.write("GATES.md", s.read("GATES.md")
+      .replace(/- \[[ xX]\] G1:/, "- [x] G1:")
+      .replace(/EVIDENCE: .*$/m, "EVIDENCE: legacy automatic evidence"));
+
+    makeStaleChecked();
+    const [lateFailure, earlyPass] = await Promise.all([
+      gateRun(s, [], { approve: false, env: { RACE_OUTCOME: "fail", RACE_DELAY: "800" } }),
+      gateRun(s, [], { approve: false, env: { RACE_OUTCOME: "pass", RACE_DELAY: "100" } }),
+    ]);
+    has(earlyPass.out, "PASS GATES:G1");
+    has(lateFailure.out, "FAIL GATES:G1");
+    let ledger = s.read("GATES.md");
+    has(ledger, "- [ ] G1:");
+    has(ledger, "EVIDENCE: pending");
+    lacks(ledger, "automatic-evidence=", "late failure result");
+
+    makeStaleChecked();
+    const [earlyFailure, latePass] = await Promise.all([
+      gateRun(s, [], { approve: false, env: { RACE_OUTCOME: "fail", RACE_DELAY: "100" } }),
+      gateRun(s, [], { approve: false, env: { RACE_OUTCOME: "pass", RACE_DELAY: "800" } }),
+    ]);
+    has(earlyFailure.out, "FAIL GATES:G1");
+    has(latePass.out, "PASS GATES:G1");
+    ledger = s.read("GATES.md");
+    has(ledger, "- [x] G1:");
+    has(ledger, "EVIDENCE: automatic-evidence=v1; definition-sha256=");
+    const status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 0, "late current pass did not leave the gate met\n" + status.out);
   } finally { s.cleanup(); }
 });
 

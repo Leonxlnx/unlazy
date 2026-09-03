@@ -17,6 +17,9 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Match CommonMark fence length, marker, indentation, and closing-line rules so nested shorter fences cannot expose example gates.
 - Add `--reverify` so parent verification executes already checked runnable gates and removes completion when the oracle no longer passes.
 - Require both process exit `0` and `EXPECT:` match. Include resolved shell, resolved working directory, exit status, match state, and a SHA-256/byte-count output fingerprint in persisted evidence; keep bounded raw diagnostics terminal-only on failure.
+- Apply the 1 MiB ceiling to both raw captured output and the canonical decoded stdout/newline/stderr string used by `EXPECT:` and evidence. This prevents separator or invalid-UTF-8 expansion from producing a reported pass whose oversized evidence immediately becomes stale.
+- Bind checker-written evidence to the parsed `CHECK:`, `EXPECT:`, and raw `CWD:` with a versioned, environment-independent full SHA-256 definition digest shared by checker, status, and Stop. Treat legacy, handwritten, malformed, future-version, and mismatched runnable evidence as stale-unmet while preserving ordinary manual evidence.
+- Keep runtime approval identity separate from evidence currentness. Status now detects definition drift without shell, `PATH`, timeout, approval-store, execution, or write dependencies; failed stale reruns clear the box and old evidence, and concurrent current-definition results remain serialized last-writer-wins.
 - Discard an in-flight result when the gate's bound oracle changes before writeback.
 - Diagnose an indented `ABANDON:` instead of ignoring it. Attributes must be indented and `ABANDON:` must not be, so the natural formatting mistake previously left a gate unmet and the honest exit unexplained.
 - Warn when a slash-wrapped `EXPECT:` containing an unescaped inner slash is read as a regular expression. A literal path silently became a pattern whose dots matched any character, and the wrapping slashes leave no way to express the literal.
@@ -33,10 +36,11 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Add explicit `--approve` execution consent for ledger commands. Store approvals under `~/.unlazy/approved` by default, require the canonical owner-private store to remain outside the repository, reject linked/replaced/non-private records, and bind each approval to the absolute ledger and gate, command, expectation, resolved working directory and shell, timeout, output and regex limits, regex worker limits, platform, and inherited `PATH`.
 - Add `--shell` with `UNLAZY_SHELL` fallback. Keep the platform shell as the final default and make inherited `PATH` behavior visible.
 - Replace POSIX-only gate examples with repository-owned Node scripts and document Windows shell and PATH variance.
+- On Windows, retain strict `dev` plus `ino` same-file checks by comparing the original descriptor with a second non-creating descriptor opened from the current name. Continue bracketing that identity acquisition with named-entry symlink, type, link-count, and replacement guards instead of ignoring device identity globally.
 - On Windows timeouts, terminate an active `cmd.exe` tree with the drive-root `<drive>:\Windows\System32\taskkill.exe` only when `SystemRoot`, `WINDIR`, and `SystemDrive` agree. Bound the helper itself to one second, inspect every result, and fall back to the direct child without PATH lookup. Skip numeric-PID cleanup when Node has already observed leader exit, and independently settle after cleanup even when descendants retain pipes. The Windows CI path launches and reaps a real shell plus nested Node descendant.
 - Keep a detached Node supervisor alive until each shell and inherited output stream closes. POSIX cleanup signals the group only while that exact supervisor still owns its PID/PGID, preventing a reused numeric group from being targeted without regressing descendant cleanup.
 - Add [SECURITY.md](SECURITY.md) for command, environment, installer, hook, evidence, scope, and lease boundaries.
-- Clarify that approval binds declared oracle text/environment, not called scripts or other transitive files, while `--status` and Stop report historical evidence until explicit `--reverify`.
+- Clarify that approval binds declared oracle text/environment, not called scripts or other transitive files, while `--status` and Stop validate only structural definition currentness until explicit `--reverify` checks artifacts.
 
 ### Orchestration and concurrency
 
@@ -64,7 +68,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Validate settings container shapes, preserve unrelated entries, write atomically, and create `<settings-file>.unlazy.bak` before replacing an existing settings file.
 - Repair matching hook commands whose managed type or timeout fields drifted, and return the documented infrastructure exit code when approval storage fails.
 - Warn that local settings and `.unlazy/` should remain untracked and that `--shared` embeds a machine-specific absolute path.
-- Keep Node 16 compatibility and zero runtime dependencies. Add a package test command and cross-platform CI.
+- Keep Node 16 compatibility and zero runtime dependencies. Add a package test command and cross-platform CI, plus a dedicated Windows Node 22.14.0/libuv 1.49.2 lane for the affected stat implementation.
 - Add valid `agents/openai.yaml` metadata and keep `SKILL.md` focused through linked references.
 - Add a revisioned PLAN contract inventory that maps every independently omittable required outcome and acceptance-changing constraint to an owner and observation, plus request rereads before fan-out and root completion.
 - Correct research titles, dates, ordering, and metric interpretation. Add a reproducibility protocol and label the historical six-run comparison's missing raw artifacts.
@@ -88,6 +92,8 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - [#26](https://github.com/Leonxlnx/unlazy/pull/26): shared-parser warning for ambiguous path-shaped EXPECT regexes by Daz Alderson
 - [#29](https://github.com/Leonxlnx/unlazy/pull/29): leaf-versus-branch gate placement, visible PLAN dispatch metadata, and host-neutral skill wording by mafiaboyhacker
 - [#21](https://github.com/Leonxlnx/unlazy/issues/21) and [#23](https://github.com/Leonxlnx/unlazy/issues/23): abandonment-promotion and contract-omission reports and reproducers by theislampill
+- [#30](https://github.com/Leonxlnx/unlazy/issues/30): affected-Windows descriptor/path `st_dev` mismatch report and reproduction
+- [#31](https://github.com/Leonxlnx/unlazy/issues/31): automatic-evidence definition drift report and false-green reproduction
 
 ## 2.0.0 source milestone, 2026-08-10
 

@@ -8,7 +8,7 @@
 // Prints "N/N passed" on success, which is the string CI and the repo's own
 // gates match on.
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -360,6 +360,111 @@ test("hook: blocks on its own scope, naming qualified ids", async () => {
     assertHas(r.out, '"decision":"block"');
     assertHas(r.out, "leaf-7:G3");
     assertHas(r.out, "[scope api]");
+  } finally { s.cleanup(); }
+});
+
+test("hook: stale definition evidence blocks repeated ids without executing and keeps semantic progress", async () => {
+  const s = sandbox();
+  try {
+    s.write("a.mjs", [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync('runs-a.log', 'run\\n');",
+      "console.log('A-OK');",
+      "",
+    ].join("\n"));
+    s.write("b.mjs", [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync('runs-b.log', 'run\\n');",
+      "console.log('B-OK');",
+      "",
+    ].join("\n"));
+    s.write(".unlazy/api/gates/leaf-current.md", "# Gates\n\n" +
+      gate("G1", "current automatic evidence", "node a.mjs", "A-OK"));
+    s.write(".unlazy/api/gates/leaf-stale.md", "# Gates\n\n" +
+      gate("G1", "stale automatic evidence", "node b.mjs", "B-OK"));
+    const seed = await run(GATE_CHECK, ["--scope", "api"], { cwd: s.dir });
+    assert(seed.code === 0, seed.out);
+
+    const currentBefore = s.read(".unlazy/api/gates/leaf-current.md");
+    const staleBefore = s.read(".unlazy/api/gates/leaf-stale.md");
+    s.write(".unlazy/api/gates/leaf-stale.md",
+      staleBefore.replace("CHECK: node b.mjs", "CHECK: node ./b.mjs"));
+    const staleBytes = s.read(".unlazy/api/gates/leaf-stale.md");
+    const runsA = s.read("runs-a.log");
+    const runsB = s.read("runs-b.log");
+
+    const status = await run(GATE_CHECK, ["--scope", "api", "--status"], { cwd: s.dir });
+    assert(status.code === 1, "stale multi-file status returned " + status.code + "\n" + status.out);
+    assertHas(status.out, "UNMET leaf-stale:G1 (checked but automatic evidence is stale or unbound)");
+    assertLacks(status.out, "UNMET leaf-current:G1", "multi-file status");
+    assertLacks(status.out, "ALL MET", "multi-file status");
+    assert(s.read(".unlazy/api/gates/leaf-current.md") === currentBefore,
+      "status changed current sibling ledger");
+    assert(s.read(".unlazy/api/gates/leaf-stale.md") === staleBytes,
+      "status changed stale ledger");
+
+    const stdin = JSON.stringify({ cwd: s.dir, session_id: "stale-definition-hook" });
+    const firstHook = await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+    assertHas(firstHook.out, '"decision":"block"');
+    assertHas(firstHook.out, "leaf-stale:G1");
+    assertLacks(firstHook.out, "leaf-current:G1", "Stop reason");
+    assertLacks(firstHook.out, "definition-sha256", "privileged Stop reason");
+    assert(s.read("runs-a.log") === runsA && s.read("runs-b.log") === runsB,
+      "status or Stop executed a CHECK");
+
+    // Another CHECK edit leaves the same semantic stale-unmet state and must
+    // increment, not reset, the six-block no-progress guard.
+    s.write(".unlazy/api/gates/leaf-stale.md",
+      staleBytes.replace("CHECK: node ./b.mjs", "CHECK: node ././b.mjs"));
+    const secondHook = await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+    assertHas(secondHook.out, '"decision":"block"');
+    const hookState = JSON.parse(s.read(".unlazy/api/hook-state.json"));
+    assert(Object.values(hookState.sessions)[0].blocks === 2,
+      "stale definition edit reset semantic progress: " + JSON.stringify(hookState));
+
+    const repaired = await run(GATE_CHECK, ["--scope", "api"], { cwd: s.dir });
+    assert(repaired.code === 0, repaired.out);
+    assertHas(repaired.out, "PASS leaf-stale:G1");
+    const allowed = await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin });
+    assertLacks(allowed.out, '"decision":"block"', "repaired Stop hook");
+    assert(!existsSync(join(s.dir, ".unlazy", "api", "hook-state.json")),
+      "completed scope retained stale hook progress state");
+  } finally { s.cleanup(); }
+});
+
+test("hook: a matching digest with a malformed success transcript stays unmet", async () => {
+  const s = sandbox();
+  try {
+    s.write("check.mjs", [
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync('runs.log', 'run\\n');",
+      "console.log('OK');",
+      "",
+    ].join("\n"));
+    const file = ".unlazy/api/gates/leaf.md";
+    s.write(file, "# Gates\n\n" + gate("G1", "canonical automatic success", "node check.mjs", "OK"));
+    const seed = await run(GATE_CHECK, ["--scope", "api"], { cwd: s.dir });
+    assert(seed.code === 0, seed.out);
+    const current = s.read(file);
+    const digest = (current.match(/definition-sha256=([a-f0-9]{64});/) || [])[1];
+    assert(digest, "seed evidence lacks a definition digest\n" + current);
+    s.write(file, current.replace(/EVIDENCE: .*$/m,
+      "EVIDENCE: automatic-evidence=v1; definition-sha256=" + digest +
+      "; exit=1; EXPECT=not matched; output-sha256=" + "a".repeat(64) + "; output-bytes=0;"));
+    const malformed = s.read(file);
+    const runs = s.read("runs.log");
+
+    const status = await run(GATE_CHECK, ["--scope", "api", "--status"], { cwd: s.dir });
+    assert(status.code === 1, "malformed automatic transcript passed status\n" + status.out);
+    assertHas(status.out, "checked but automatic evidence is stale or unbound");
+    assert(s.read(file) === malformed, "status rewrote malformed automatic evidence");
+    const hook = await run(STOP_HOOK, ["--scope", "api"], {
+      cwd: s.dir,
+      stdin: JSON.stringify({ cwd: s.dir, session_id: "malformed-auto-hook" }),
+    });
+    assertHas(hook.out, '"decision":"block"');
+    assertHas(hook.out, "leaf:G1");
+    assert(s.read("runs.log") === runs, "status or Stop executed malformed automatic evidence");
   } finally { s.cleanup(); }
 });
 

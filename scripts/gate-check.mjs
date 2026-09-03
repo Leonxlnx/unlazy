@@ -14,9 +14,12 @@ import { delimiter, dirname, basename, isAbsolute, join, relative, resolve, sep 
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
-  UNLAZY_DIR, appendStatus, claimLeases, formatDocument, gateState,
+  MAX_AUTOMATIC_EVIDENCE_CHARS, MAX_CHECK_OUTPUT_BYTES, UNLAZY_DIR, appendStatus,
+  automaticEvidencePrefix, claimLeases, formatDocument,
+  gateDefinitionDigest, gateState,
   hookStatePath, listScopes, parseGates, qualify, readStableRegularFile, releaseLeases,
-  resolveTarget, scopeRoot, sha256, sleep, validateScopeId, withFileLock, writeAtomic,
+  resolveTarget, sameFileIdentity, scopeRoot, sha256, sleep, statCurrentNamedFile,
+  validateScopeId, withFileLock, writeAtomic,
 } from "./lib/gates.mjs";
 import { terminateProcessTree } from "./lib/process-tree.mjs";
 import { dispatchStatus } from "./lib/dispatch.mjs";
@@ -60,7 +63,7 @@ const VALUE_OPTIONS = new Set([
   "--scope", "--leaf", "--timeout", "--jobs", "--cwd", "--root",
   "--log", "--bind", "--shell",
 ]);
-const MAX_OUTPUT_BYTES = 1024 * 1024;
+const MAX_OUTPUT_BYTES = MAX_CHECK_OUTPUT_BYTES;
 const MAX_APPROVAL_BYTES = 256 * 1024;
 const MAX_GATE_LEDGER_BYTES = 8 * 1024 * 1024;
 const REGEX_TIMEOUT_MS = 250;
@@ -331,12 +334,15 @@ function resolveShell(raw) {
   failUsage("cannot resolve command shell " + JSON.stringify(requested) + " from PATH");
 }
 
-const shell = opt.status ? "(not used: status mode)" : resolveShell(opt.shell);
-const pathValue = String(process.env.PATH || "");
-const pathHash = sha256(pathValue).slice(0, 12);
-const pathCount = pathValue ? pathValue.split(delimiter).length : 0;
-const pathEvidence = pathHash + "/" + pathCount + " entries";
-const pathTranscript = pathValue.replace(/[\r\n]/g, " ").slice(0, 800) + (pathValue.length > 800 ? "..." : "");
+// Status currentness is a pure function of parsed ledger text. Do not resolve
+// a shell, read PATH, or initialize approval storage for that mode.
+const shell = opt.status ? null : resolveShell(opt.shell);
+const pathValue = opt.status ? null : String(process.env.PATH || "");
+const pathHash = opt.status ? null : sha256(pathValue).slice(0, 12);
+const pathCount = opt.status ? null : (pathValue ? pathValue.split(delimiter).length : 0);
+const pathEvidence = opt.status ? null : pathHash + "/" + pathCount + " entries";
+const pathTranscript = opt.status ? null
+  : pathValue.replace(/[\r\n]/g, " ").slice(0, 800) + (pathValue.length > 800 ? "..." : "");
 
 function resolvedGateCwd(gate, file) {
   // Explicit ledgers are self-contained: absent --cwd, relative commands and
@@ -364,7 +370,7 @@ function oracle(file, gate) {
   };
 }
 
-function signature(file, gate) {
+function approvalOracleSignature(file, gate) {
   return sha256(JSON.stringify(oracle(file, gate)));
 }
 
@@ -373,12 +379,13 @@ function pathIsInside(parent, child) {
   return rel === "" || (!rel.startsWith(".." + sep) && rel !== ".." && !isAbsolute(rel));
 }
 
-const approvalDir = resolve(process.env.UNLAZY_APPROVAL_DIR || join(homedir(), ".unlazy", "approved"));
-const canonicalRoot = realpathSync(root);
+const approvalDir = opt.status ? null
+  : resolve(process.env.UNLAZY_APPROVAL_DIR || join(homedir(), ".unlazy", "approved"));
+const canonicalRoot = opt.status ? null : realpathSync(root);
 if (!opt.status && pathIsInside(root, approvalDir)) failUsage("UNLAZY_APPROVAL_DIR must be outside the repository root");
 
 function approvalPath(file, gate, directory = approvalDir) {
-  const identity = resolve(file) + "\0" + gate.id + "\0" + signature(file, gate);
+  const identity = resolve(file) + "\0" + gate.id + "\0" + approvalOracleSignature(file, gate);
   return join(directory, sha256(identity) + ".json");
 }
 
@@ -388,10 +395,13 @@ function assertPrivateApprovalEntry(path, info, kind) {
   }
   const uid = typeof process.geteuid === "function" ? process.geteuid()
     : typeof process.getuid === "function" ? process.getuid() : null;
-  if (uid !== null && info.uid !== uid) {
+  const expectedUid = typeof info.uid === "bigint" && uid !== null ? BigInt(uid) : uid;
+  if (uid !== null && info.uid !== expectedUid) {
     throw new Error(path + " must be owned by the current user");
   }
-  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+  const permissionMask = typeof info.mode === "bigint" ? 0o077n : 0o077;
+  const extraPermissions = info.mode & permissionMask;
+  if (process.platform !== "win32" && extraPermissions !== 0 && extraPermissions !== 0n) {
     throw new Error(path + " must not grant group or other permissions");
   }
 }
@@ -399,21 +409,21 @@ function assertPrivateApprovalEntry(path, info, kind) {
 function validatedApprovalDir({ create = false } = {}) {
   if (create) mkdirSync(approvalDir, { recursive: true, mode: 0o700 });
   else if (!existsSync(approvalDir)) return null;
-  const info = lstatSync(approvalDir);
+  const info = lstatSync(approvalDir, { bigint: true });
   assertPrivateApprovalEntry(approvalDir, info, "directory");
   const canonical = realpathSync(approvalDir);
   if (pathIsInside(canonicalRoot, canonical)) {
     throw new Error("approval directory resolves inside the repository root: " + canonical);
   }
-  const canonicalInfo = lstatSync(canonical);
+  const canonicalInfo = lstatSync(canonical, { bigint: true });
   assertPrivateApprovalEntry(canonical, canonicalInfo, "directory");
   return { path: canonical, dev: canonicalInfo.dev, ino: canonicalInfo.ino };
 }
 
 function assertApprovalDirUnchanged(store) {
-  const current = lstatSync(store.path);
+  const current = lstatSync(store.path, { bigint: true });
   assertPrivateApprovalEntry(store.path, current, "directory");
-  if (current.dev !== store.dev || current.ino !== store.ino) {
+  if (!sameFileIdentity(current, store)) {
     throw new Error("approval directory changed during use: " + store.path);
   }
 }
@@ -423,20 +433,26 @@ function readApprovalFile(path) {
   try {
     const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW || 0);
     fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0) | noFollow);
-    const opened = fstatSync(fd);
-    const named = lstatSync(path);
+    const opened = fstatSync(fd, { bigint: true });
+    const named = statCurrentNamedFile(path, {
+      maxBytes: MAX_APPROVAL_BYTES,
+      label: "approval record",
+    });
     assertPrivateApprovalEntry(path, opened, "file");
     if (opened.size > MAX_APPROVAL_BYTES) {
       throw new Error("approval record exceeds " + MAX_APPROVAL_BYTES + " bytes: " + path);
     }
-    if (named.isSymbolicLink() || !named.isFile() || named.nlink !== 1 || opened.nlink !== 1 ||
-        named.dev !== opened.dev || named.ino !== opened.ino) {
+    assertPrivateApprovalEntry(path, named, "file");
+    if (opened.nlink !== 1n || !sameFileIdentity(named, opened)) {
       throw new Error("refusing linked or replaced approval record " + path);
     }
     const text = readFileSync(fd, "utf8");
-    const after = lstatSync(path);
-    if (after.isSymbolicLink() || !after.isFile() || after.nlink !== 1 ||
-        after.dev !== opened.dev || after.ino !== opened.ino) {
+    const after = statCurrentNamedFile(path, {
+      maxBytes: MAX_APPROVAL_BYTES,
+      label: "approval record",
+    });
+    assertPrivateApprovalEntry(path, after, "file");
+    if (!sameFileIdentity(after, opened)) {
       throw new Error("approval record changed while it was read: " + path);
     }
     return text;
@@ -459,7 +475,8 @@ function approvalExists(file, gate) {
   try { value = JSON.parse(text); }
   catch { return false; }
   assertApprovalDirUnchanged(store);
-  return value && value.file === resolve(file) && value.gate === gate.id && value.signature === signature(file, gate);
+  return value && value.file === resolve(file) && value.gate === gate.id &&
+    value.signature === approvalOracleSignature(file, gate);
 }
 
 async function recordApproval(file, gate) {
@@ -486,7 +503,8 @@ async function recordApproval(file, gate) {
   try {
     writeFileSync(fd, JSON.stringify({ owner, pid: process.pid, at: Date.now() }));
     const value = {
-      schema: 1, file: resolve(file), gate: gate.id, signature: signature(file, gate),
+      schema: 1, file: resolve(file), gate: gate.id,
+      signature: approvalOracleSignature(file, gate),
       oracle: oracle(file, gate), approvedAt: new Date().toISOString(),
     };
     writeAtomic(token, JSON.stringify(value, null, 2) + "\n");
@@ -577,11 +595,16 @@ async function safeRegexMatch(expectation, output) {
   }
 }
 
+function outputFingerprint(output) {
+  const value = String(output);
+  return { sha256: sha256(value), bytes: Buffer.byteLength(value, "utf8") };
+}
+
 function runCheck(task) {
   return new Promise((done) => {
     const chunks = { stdout: [], stderr: [] };
     let bytes = 0;
-    let overflow = false;
+    let rawOverflow = false;
     let timedOut = false;
     let spawnError = null;
     let closed = false;
@@ -600,16 +623,25 @@ function runCheck(task) {
       const stdout = Buffer.concat(chunks.stdout).toString("utf8");
       const stderr = Buffer.concat(chunks.stderr).toString("utf8");
       const output = stdout + (stdout && stderr ? "\n" : "") + stderr;
+      // EXPECT and persisted fingerprints both use this exact combined string.
+      // Keep its UTF-8 representation within the same 1 MiB ceiling as raw
+      // capture: invalid byte replacement and the stream separator can expand
+      // it even when the child emitted exactly MAX_OUTPUT_BYTES raw bytes.
+      const fingerprint = outputFingerprint(output);
+      const normalizedOverflow = fingerprint.bytes > MAX_OUTPUT_BYTES;
+      const overflow = rawOverflow || normalizedOverflow;
       const match = timedOut || overflow || spawnError
         ? { matched: false }
         : await safeRegexMatch(task.gate.expectation, output);
       const cleanupSuffix = cleanupDiagnostic ? "; cleanup: " + cleanupDiagnostic : "";
       const error = timedOut ? "timed out after " + timeoutSeconds + "s" + cleanupSuffix
-        : overflow ? "output exceeded " + MAX_OUTPUT_BYTES + " bytes" + cleanupSuffix
+        : overflow ? "output exceeded " + MAX_OUTPUT_BYTES + " bytes" +
+          (rawOverflow ? "" : " after stdout/stderr UTF-8 combination") + cleanupSuffix
           : spawnError ? spawnError.message
             : match.error || null;
       done({
-        ...task, output, exitCode, signal, matched: Boolean(match.matched), error,
+        ...task, output, outputFingerprint: fingerprint,
+        exitCode, signal, matched: Boolean(match.matched), error,
         ok: !error && exitCode === 0 && Boolean(match.matched),
       });
     };
@@ -642,8 +674,8 @@ function runCheck(task) {
       const remaining = MAX_OUTPUT_BYTES - bytes;
       if (remaining > 0) chunks[stream].push(buffer.subarray(0, remaining));
       bytes += buffer.length;
-      if (bytes > MAX_OUTPUT_BYTES && !overflow) {
-        overflow = true;
+      if (bytes > MAX_OUTPUT_BYTES && !rawOverflow) {
+        rawOverflow = true;
         stopChild();
       }
     };
@@ -658,7 +690,10 @@ function runCheck(task) {
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
-      done({ ...task, ok: false, output: "", exitCode: null, signal: null, matched: false, error: error.message });
+      done({
+        ...task, ok: false, output: "", outputFingerprint: outputFingerprint(""),
+        exitCode: null, signal: null, matched: false, error: error.message,
+      });
       return;
     }
     child.stdout.on("data", (chunk) => capture("stdout", chunk));
@@ -701,7 +736,15 @@ for (const ledger of ledgers) {
       if (error.code === "ENOENT") failUsage("gate " + qualify(ledger.file, gate.id) + " CWD does not exist: " + cwd);
       failUsage("cannot inspect gate CWD " + cwd + ": " + error.message);
     }
-    pending.push({ file: ledger.file, gate, cwd, wasMet: state === "met", signature: signature(ledger.file, gate) });
+    pending.push({
+      file: ledger.file,
+      gate,
+      cwd,
+      startingState: state,
+      wasMet: state === "met",
+      definitionDigest: gateDefinitionDigest(gate),
+      approvalSignature: approvalOracleSignature(ledger.file, gate),
+    });
   }
 }
 
@@ -741,12 +784,8 @@ for (const task of runnable) {
   console.log("  RUN  " + qualify(task.file, task.gate.id) + " shell=" + shell + " cwd=" + task.cwd + " PATH=" + pathTranscript);
 }
 const results = opt.status ? [] : await runRolling(runnable, jobs);
-const outputFingerprint = (output) => ({
-  sha256: sha256(String(output)),
-  bytes: Buffer.byteLength(String(output), "utf8"),
-});
 for (const result of results) {
-  const fingerprint = outputFingerprint(result.output);
+  const fingerprint = result.outputFingerprint;
   const outputSummary = result.ok
     ? "sha256=" + fingerprint.sha256 + "; bytes=" + fingerprint.bytes
     : failureOutput(result.output);
@@ -772,10 +811,14 @@ function failureOutput(output, max = 480) {
 
 function evidenceFor(result) {
   const clean = (value) => terminalSafe(value).replace(/[\r\n\t]+/g, " ");
-  const fingerprint = outputFingerprint(result.output);
-  return ("exit=0; shell=" + clean(shell) + "; cwd=" + clean(result.cwd) +
-    "; path=" + pathEvidence + "; EXPECT=matched; output-sha256=" + fingerprint.sha256 +
-    "; output-bytes=" + fingerprint.bytes).slice(0, 900);
+  const fingerprint = result.outputFingerprint;
+  // Keep the definition binding and successful-output fingerprint ahead of
+  // machine-specific fields so the evidence cap can truncate only transcript
+  // detail, never the structural currentness or deciding output identity.
+  return (automaticEvidencePrefix(result.definitionDigest) +
+    " exit=0; EXPECT=matched; output-sha256=" + fingerprint.sha256 +
+    "; output-bytes=" + fingerprint.bytes + "; shell=" + clean(shell) +
+    "; cwd=" + clean(result.cwd) + "; path=" + pathEvidence).slice(0, MAX_AUTOMATIC_EVIDENCE_CHARS);
 }
 
 function insertOrUpdateEvidence(doc, gate, value) {
@@ -792,17 +835,23 @@ function insertOrUpdateEvidence(doc, gate, value) {
 const resultKey = (file, id) => resolve(file) + "\0" + id;
 const staleResults = new Map();
 for (const result of results) {
-  if (!result.ok && !(opt.reverify && result.wasMet)) continue;
   try {
     await withFileLock(root, result.file, () => {
       let doc = parseGates(readLedgerFile(result.file));
       if (doc.errors.length) throw new Error("fresh ledger became invalid: " + doc.errors.join("; "));
       const fresh = doc.gates.find((gate) => gate.id === result.gate.id);
-      if (!fresh || signature(result.file, fresh) !== result.signature) {
+      if (!fresh || gateDefinitionDigest(fresh) !== result.definitionDigest ||
+          approvalOracleSignature(result.file, fresh) !== result.approvalSignature) {
         staleResults.set(resultKey(result.file, result.gate.id), qualify(result.file, result.gate.id));
-        console.log("  STALE " + qualify(result.file, result.gate.id) + ": CHECK/EXPECT/CWD/shell signature changed; result not written");
+        console.log("  STALE " + qualify(result.file, result.gate.id) +
+          ": definition or runtime approval oracle changed; result not written");
         return;
       }
+      const freshState = gateState(fresh, doc.abandoned);
+      if (freshState === "abandoned") return;
+      const mustWriteFailure = result.startingState === "stale-unmet" ||
+        (opt.reverify && result.wasMet) || fresh.checked;
+      if (!result.ok && !mustWriteFailure) return;
       if (result.ok) {
         doc.lines[fresh.line] = doc.lines[fresh.line].replace(/^- \[( |x|X)\]/, "- [x]");
         insertOrUpdateEvidence(doc, fresh, evidenceFor(result));
@@ -844,8 +893,11 @@ for (const ledger of ledgers) {
       totalUnmet++;
       unmetIds.push(qualify(ledger.file, gate.id));
       if (opt.status) {
+        const reason = state === "unmet" ? "unchecked"
+          : state === "unmet-no-evidence" ? "checked but EVIDENCE pending"
+            : "checked but automatic evidence is stale or unbound";
         console.log("  UNMET " + qualify(ledger.file, gate.id) + " (" +
-          (state === "unmet" ? "unchecked" : "checked but EVIDENCE pending") + "): " + gate.title);
+          reason + "): " + gate.title);
       }
     }
   }

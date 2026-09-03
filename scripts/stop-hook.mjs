@@ -153,8 +153,8 @@ for (const file of [...target.files].sort()) {
   for (const gate of doc.gates) {
     const state = gateState(gate, doc.abandoned);
     resolved.push(qualify(file, gate.id) + "=" + state);
-    if (state === "unmet" || state === "unmet-no-evidence") unmet.push(qualify(file, gate.id));
-    else if (state === "abandoned") handoffs.push(qualify(file, gate.id));
+    if (state === "abandoned") handoffs.push(qualify(file, gate.id));
+    else if (state !== "met") unmet.push(qualify(file, gate.id));
   }
 }
 

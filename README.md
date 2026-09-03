@@ -88,7 +88,7 @@ Use `--help` for the complete current CLI.
   EVIDENCE: pending
 ```
 
-A runnable gate passes only when its process exits `0` and `EXPECT:` matches combined output. Evidence records the resolved shell, resolved working directory, exit status, a short `PATH` fingerprint, the match result, and a SHA-256/byte-count fingerprint of successful output. Raw successful output is neither echoed nor persisted. The pre-execution transcript shows the resolved `PATH`, capped for display. Old evidence is not re-execution; parent verification uses `--reverify`.
+A runnable gate passes only when its process exits `0` and `EXPECT:` matches combined output. Both the captured stdout/stderr payload and the canonical UTF-8 combined string used by `EXPECT:` and its fingerprint must fit the 1 MiB limit; the checker never truncates a larger matcher string into success. Canonical automatic evidence begins with a versioned full SHA-256 digest of the parsed `CHECK:`, `EXPECT:`, and raw `CWD:` definition, followed by the exit and successful-output fingerprint before capped environment details. A checked runnable gate with missing, ordinary prose, legacy, malformed, or definition-mismatched evidence is stale and unmet. Existing manual gates with ordinary human evidence remain compatible. This unkeyed binding detects structural drift, not ledger tampering: anyone who can edit a ledger can forge canonical-looking evidence. `--status` and Stop detect definition drift without resolving a shell or executing a check, but old evidence is not re-execution; parent verification uses `--reverify`.
 
 The parser rejects zero-gate ledgers, duplicate ids, incomplete runnable gates, invalid expectations, and abandonment with a missing reason or unknown gate id. It ignores fenced examples, preserves CRLF or LF when updating, and inserts a missing evidence line when needed. A valid abandonment is terminal handoff rather than success: the checker exits `1` with `HANDOFF REQUIRED`, and Stop allows exit while reporting qualified ids.
 
@@ -114,7 +114,7 @@ Parent re-verification should use the same declared shell and required toolchain
 
 Approval records live under `~/.unlazy/approved` by default. `UNLAZY_APPROVAL_DIR` may select another owner-private real directory, but its canonical target must remain outside the checked repository. Symlinked stores and linked, replaced, or non-private records fail closed. Each record is specific to the absolute ledger and gate, exact `CHECK:` and `EXPECT:`, resolved `CWD:` and shell, timeout, output and regex limits, regex worker limits, platform, and full inherited `PATH`. Editing any bound input requires approval again.
 
-Approval is consent, not a sandbox. Approval storage is a canonical, owner-private directory outside the repository; records are accepted only as single-link private regular files. Approval does not hash called scripts, fixtures, dependencies, or other transitive inputs, and `--status`/Stop do not revalidate old evidence. Reinspect changed dependencies and run `--reverify`; see [SECURITY.md](SECURITY.md) for the bounded digest pattern when user-designed dependency identity is needed. Checks run with ambient filesystem, environment, credential, and network access. Scopes and ownership leases coordinate cooperating processes but do not restrict what a process can read or write.
+Approval is consent, not a sandbox. Approval storage is a canonical, owner-private directory outside the repository; records are accepted only as single-link private regular files. The environment-independent definition digest is separate from the runtime approval identity, which also binds resolved ledger/runtime context. Approval does not hash called scripts, fixtures, dependencies, or other transitive inputs. `--status` and Stop validate the recorded definition binding but do not inspect those artifacts; reinspect changed dependencies and run `--reverify`. See [SECURITY.md](SECURITY.md) for the bounded digest pattern when user-designed dependency identity is needed. Checks run with ambient filesystem, environment, credential, and network access. Scopes and ownership leases coordinate cooperating processes but do not restrict what a process can read or write.
 
 ## Orchestration and parallel work
 
@@ -172,6 +172,8 @@ The unreleased `2.1.0` source integrates the useful parts of community PRs while
 - revisioned PLAN contract inventories and final request reconciliation
 - advisory gate linting with opt-in strict failure
 - non-successful gate abandonment that cannot promote parent completion
+- definition-bound automatic evidence shared by checker/status/Stop, with fail-closed legacy migration and manual-gate compatibility
+- strict Windows file identity through comparable descriptor stats, including pinned Node 22.14.0/libuv 1.49.2 CI coverage
 - bounded Windows timeout process-tree cleanup with a live nested-descendant CI regression
 - session-keyed Stop-hook state and atomic settings updates with a backup
 - Node 16 support, zero runtime dependencies, a package test command, and CI

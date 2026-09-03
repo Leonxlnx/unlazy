@@ -593,6 +593,24 @@ test("installer: a FIFO settings target is rejected without blocking", async () 
   } finally { s.cleanup(); }
 });
 
+test("installer: a hard-linked settings target is rejected without backup or victim mutation", async () => {
+  const s = sandbox();
+  try {
+    const original = JSON.stringify({ editor: "keep" }, null, 2) + "\n";
+    const victim = s.write("settings-victim.json", original);
+    mkdirSync(s.path(".claude"), { recursive: true });
+    const target = s.path(".claude/settings.local.json");
+    linkSync(victim, target);
+
+    const result = await run(INSTALL, [], { cwd: s.dir });
+    assert(result.code === 1, "hard-linked installer target did not fail closed\n" + result.out);
+    has(result.out, "Refusing to touch");
+    assert(s.read("settings-victim.json") === original, "installer changed hard-link victim bytes");
+    assert(s.read(".claude/settings.local.json") === original, "installer changed hard-linked target bytes");
+    assert(!existsSync(target + ".unlazy.bak"), "installer backed up an unsafe linked target");
+  } finally { s.cleanup(); }
+});
+
 test("installer: uninstall preserves a sibling in the same matcher group and writes a backup", async () => {
   const s = sandbox();
   try {

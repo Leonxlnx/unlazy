@@ -2,13 +2,15 @@
 // Install or remove unlazy's Claude Code Stop hook. Zero dependencies. Node 16+.
 
 import {
-  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync,
   openSync, readFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
-import { validateScopeId, writeAtomic } from "./lib/gates.mjs";
+import {
+  sameFileIdentity, statCurrentNamedFile, validateScopeId, writeAtomic,
+} from "./lib/gates.mjs";
 
 const HELP = `usage: install-hooks.mjs [--scope ID] [--shared | --global] [--uninstall]
 
@@ -65,17 +67,14 @@ if (existsSync(target)) {
   try {
     const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW || 0);
     fd = openSync(target, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0) | noFollow);
-    const opened = fstatSync(fd);
-    const named = lstatSync(target);
-    if (!opened.isFile() || !named.isFile() || named.isSymbolicLink() ||
-        opened.nlink !== 1 || named.nlink !== 1 ||
-        opened.dev !== named.dev || opened.ino !== named.ino) {
+    const opened = fstatSync(fd, { bigint: true });
+    const named = statCurrentNamedFile(target, { label: "settings target" });
+    if (!opened.isFile() || opened.nlink !== 1n || !sameFileIdentity(opened, named)) {
       throw new Error("target must be one unchanged regular file, not a link or directory");
     }
     raw = readFileSync(fd, "utf8");
-    const after = lstatSync(target);
-    if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 ||
-        after.dev !== opened.dev || after.ino !== opened.ino) {
+    const after = statCurrentNamedFile(target, { label: "settings target" });
+    if (!sameFileIdentity(opened, after)) {
       throw new Error("target changed while it was read");
     }
     settings = JSON.parse(raw);

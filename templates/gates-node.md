@@ -32,8 +32,8 @@ Scope: integrate children <explicit child ids> into one verified result
 Replace every placeholder before running the checker.
 
 N1 must name every direct child ledger explicitly, whether that child is a leaf
-or another branch, and use --reverify, not --status. Status reports old evidence
-without executing it. Keep --jobs 1 unless the child checks are independent and
+or another branch, and use --reverify, not --status. Status validates the stored
+definition binding without executing or inspecting current artifacts. Keep --jobs 1 unless the child checks are independent and
 deterministic parallel execution is intentional.
 If a child reports an abandonment, N1 exits 1 with `HANDOFF REQUIRED`. Mark the
 branch ABANDONED and surface the handoff; never rewrite that result as completion.

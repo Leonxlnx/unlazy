@@ -11,6 +11,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 export const UNLAZY_DIR = ".unlazy";
 export const LOCK_DIR = join(UNLAZY_DIR, "locks");
+export const MAX_CHECK_OUTPUT_BYTES = 1024 * 1024;
+export const MAX_AUTOMATIC_EVIDENCE_CHARS = 900;
 
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 export const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
@@ -29,21 +31,87 @@ function pathIsInside(parent, child) {
   return rel === "" || (!rel.startsWith(".." + sep) && rel !== ".." && !isAbsolute(rel));
 }
 
-function sameIdentity(left, right) {
+export function sameFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
 function sameSnapshot(left, right) {
-  return sameIdentity(left, right) && left.size === right.size &&
-    left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+  return sameFileIdentity(left, right) && left.size === right.size &&
+    (left.mtimeNs === undefined ? left.mtimeMs : left.mtimeNs) ===
+      (right.mtimeNs === undefined ? right.mtimeMs : right.mtimeNs) &&
+    (left.ctimeNs === undefined ? left.ctimeMs : left.ctimeNs) ===
+      (right.ctimeNs === undefined ? right.ctimeMs : right.ctimeNs);
 }
 
 function assertRegularSingleLink(info, target, label, maxBytes) {
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
+  if (!info.isFile() || info.isSymbolicLink() || (info.nlink !== 1 && info.nlink !== 1n)) {
     throw new Error(label + " must be one unchanged regular single-link file: " + target);
   }
   if (info.size > maxBytes) {
     throw new Error(label + " exceeds " + maxBytes + " bytes: " + target);
+  }
+}
+
+// Path-based stat and descriptor-based stat used different Windows/libuv
+// implementations in affected Node releases, so their `dev` fields are not
+// comparable. Keep lstat as the named-entry link/type guard, but on Windows
+// acquire identity through a second, non-creating descriptor opened from the
+// current name. Callers can then compare fstat to fstat without weakening the
+// strict volume-plus-file identity rule.
+export function statCurrentNamedFile(path, options = {}) {
+  const target = resolve(path);
+  const kind = String(options.label || "file");
+  const limit = options.maxBytes === undefined ? Infinity : Number(options.maxBytes);
+  if (!(limit === Infinity || (Number.isInteger(limit) && limit >= 1))) {
+    throw new Error(kind + " maxBytes must be a positive integer");
+  }
+  const accessFlags = options.openFlags === undefined
+    ? fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK || 0)
+    : Number(options.openFlags);
+  const mutatingFlags = (fsConstants.O_CREAT || 0) | (fsConstants.O_TRUNC || 0);
+  if (!Number.isInteger(accessFlags) || (accessFlags & mutatingFlags) !== 0) {
+    throw new Error(kind + " identity descriptor must use non-creating, non-truncating flags");
+  }
+
+  const before = lstatSync(target, { bigint: true });
+  assertRegularSingleLink(before, target, kind, limit);
+  if (process.platform !== "win32") return before;
+
+  let fd = null;
+  try {
+    fd = openSync(target, accessFlags);
+    const current = fstatSync(fd, { bigint: true });
+    assertRegularSingleLink(current, target, kind, limit);
+    const after = lstatSync(target, { bigint: true });
+    assertRegularSingleLink(after, target, kind, limit);
+    const afterCurrent = fstatSync(fd, { bigint: true });
+    assertRegularSingleLink(afterCurrent, target, kind, limit);
+    // These are two results from the same path-stat implementation, so their
+    // strict identity and snapshot fields remain comparable even on affected
+    // libuv builds. This brackets the secondary open without comparing
+    // path-stat `dev` to descriptor-stat `dev`.
+    const namedEntryUnchanged = options.stableSnapshot === false
+      ? sameFileIdentity(before, after)
+      : sameSnapshot(before, after);
+    if (!namedEntryUnchanged) {
+      throw new Error(kind + " changed while its named identity was checked: " + target);
+    }
+    // The lstat pair alone cannot detect A -> B -> A around a descriptor open.
+    // Exact BigInt inode equality supplies the comparable named-to-handle field
+    // exposed by the affected runtime; the caller still makes the decisive
+    // strict dev+ino fstat-to-fstat check. This remains a snapshot rather than
+    // atomic Windows path isolation; SECURITY.md documents that boundary.
+    if (before.ino !== current.ino || after.ino !== current.ino) {
+      throw new Error(kind + " descriptor does not identify its guarded name: " + target);
+    }
+    if (options.stableSnapshot !== false && !sameSnapshot(current, afterCurrent)) {
+      throw new Error(kind + " changed while its descriptor identity was checked: " + target);
+    }
+    return afterCurrent;
+  } finally {
+    // A close failure is an infrastructure failure, not a reason to accept an
+    // identity result whose secondary descriptor did not close cleanly.
+    if (fd !== null) closeSync(fd);
   }
 }
 
@@ -81,11 +149,10 @@ export function readStableRegularFile(path, { root, maxBytes, label } = {}) {
   }
 
   try {
-    const opened = fstatSync(fd);
-    const named = lstatSync(target);
+    const opened = fstatSync(fd, { bigint: true });
+    const named = statCurrentNamedFile(target, { maxBytes: limit, label: kind });
     assertRegularSingleLink(opened, target, kind, limit);
-    assertRegularSingleLink(named, target, kind, limit);
-    if (!sameIdentity(opened, named)) {
+    if (!sameFileIdentity(opened, named)) {
       throw new Error(kind + " changed before it was read: " + target);
     }
     const canonicalRoot = root === undefined ? null : realpathSync(resolve(root));
@@ -105,10 +172,9 @@ export function readStableRegularFile(path, { root, maxBytes, label } = {}) {
       if (total > limit) throw new Error(kind + " exceeds " + limit + " bytes: " + target);
     }
 
-    const afterOpened = fstatSync(fd);
-    const afterNamed = lstatSync(target);
+    const afterOpened = fstatSync(fd, { bigint: true });
+    const afterNamed = statCurrentNamedFile(target, { maxBytes: limit, label: kind });
     assertRegularSingleLink(afterOpened, target, kind, limit);
-    assertRegularSingleLink(afterNamed, target, kind, limit);
     if (!sameSnapshot(opened, afterOpened) || !sameSnapshot(afterOpened, afterNamed)) {
       throw new Error(kind + " changed while it was read: " + target);
     }
@@ -376,11 +442,54 @@ export function qualify(fileOrLabel, id) {
   return basename(String(fileOrLabel)).replace(/\.md$/i, "") + ":" + id;
 }
 
+export function gateDefinitionDigest(gate) {
+  if (!gate || typeof gate.check !== "string" || gate.check === "" ||
+      typeof gate.expect !== "string" || gate.expect === "") return null;
+  return sha256(JSON.stringify([
+    "unlazy.gate-definition",
+    1,
+    gate.check,
+    gate.expect,
+    gate.cwd === null || gate.cwd === undefined ? null : String(gate.cwd),
+  ]));
+}
+
+export function automaticEvidencePrefix(definitionDigest) {
+  if (!/^[a-f0-9]{64}$/.test(String(definitionDigest || ""))) {
+    throw new Error("automatic evidence needs a full lowercase SHA-256 definition digest");
+  }
+  return "automatic-evidence=v1; definition-sha256=" + definitionDigest + ";";
+}
+
+export function classifyGateEvidence(gate) {
+  const evidence = gate && gate.evidence === null ? "" : String((gate && gate.evidence) || "");
+  if (evidence === "" || /^pending$/i.test(evidence)) return "pending";
+  const definitionDigest = gateDefinitionDigest(gate);
+  if (definitionDigest !== null) {
+    const prefix = automaticEvidencePrefix(definitionDigest);
+    const decidingFields = evidence.slice(prefix.length);
+    const success = decidingFields.match(
+      /^ exit=0; EXPECT=matched; output-sha256=[a-f0-9]{64}; output-bytes=(0|[1-9][0-9]{0,6}); shell=./,
+    );
+    if (evidence.length <= MAX_AUTOMATIC_EVIDENCE_CHARS && evidence.startsWith(prefix) &&
+        success && Number(success[1]) <= MAX_CHECK_OUTPUT_BYTES) {
+      return "automatic-current";
+    }
+  }
+  if (evidence.startsWith("automatic-evidence=") || evidence.startsWith("exit=0; shell=")) {
+    return "automatic-stale";
+  }
+  return "human";
+}
+
 export function gateState(gate, abandoned) {
   if (abandoned.has(gate.id)) return "abandoned";
-  const pending = gate.evidence === null || gate.evidence === "" || /^pending$/i.test(gate.evidence);
   if (!gate.checked) return "unmet";
-  if (pending) return "unmet-no-evidence";
+  const evidence = classifyGateEvidence(gate);
+  const runnable = gateDefinitionDigest(gate) !== null;
+  if (runnable) return evidence === "automatic-current" ? "met" : "stale-unmet";
+  if (evidence === "pending") return "unmet-no-evidence";
+  if (evidence === "automatic-current" || evidence === "automatic-stale") return "stale-unmet";
   return "met";
 }
 
@@ -727,17 +836,21 @@ export function appendStatus(root, scope, line) {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    // Open first but write only after proving that the named entry is the same
-    // regular file as the descriptor. A symlink swap can therefore never turn
-    // the append into a write through an outside-root target.
+    // Open first but write only after validating a named-entry snapshot against
+    // the descriptor. This rejects persistent links and ordinary replacements;
+    // SECURITY.md documents the concurrent Windows path-control boundary.
     const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW || 0);
     fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT |
       (fsConstants.O_NONBLOCK || 0) | noFollow, 0o600);
-    const opened = fstatSync(fd);
-    const named = lstatSync(path);
-    if (!opened.isFile() || !named.isFile() || named.isSymbolicLink() ||
-        opened.nlink !== 1 || named.nlink !== 1 ||
-        opened.dev !== named.dev || opened.ino !== named.ino) {
+    const opened = fstatSync(fd, { bigint: true });
+    const named = statCurrentNamedFile(path, {
+      label: "status log",
+      openFlags: fsConstants.O_WRONLY | fsConstants.O_APPEND | (fsConstants.O_NONBLOCK || 0),
+      // Independent O_APPEND writers are valid; identity, link, and type are
+      // the append boundary, while concurrent size/mtime changes are expected.
+      stableSnapshot: false,
+    });
+    if (!opened.isFile() || opened.nlink !== 1n || !sameFileIdentity(opened, named)) {
       throw new Error("refusing non-file or replaced status log " + path);
     }
     writeFileSync(fd, String(line).replace(/[\r\n]+/g, " ") + "\n", "utf8");
