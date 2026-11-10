@@ -103,4 +103,4 @@ Keep leaf briefs to the contract and one ledger. Append status instead of rewrit
 
 Do not create gates for a trivial edit or factual reply. Use this discipline when the cost of quiet incompleteness justifies the ledger.
 
-When adapting this workflow for Claude Fable 5.2, read [references/fable-5-2.md](references/fable-5-2.md). It covers effort calibration, bounded delegation, and resuming long tasks without treating model settings or a handoff as completion evidence.
+When adapting this workflow for Claude Fable 5.2, read the local `references/fable-5-2.md`. It covers effort calibration, bounded delegation, and resuming long tasks without treating model settings or a handoff as completion evidence.
