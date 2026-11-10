@@ -102,3 +102,5 @@ Keep `.claude/settings.local.json`, `.unlazy/`, and `.unlazy-hook-state.json` un
 Keep leaf briefs to the contract and one ledger. Append status instead of rewriting history. Mark each execution leaf's reasoning `Tier` in the PLAN dispatch table: `judgment` when its own artifact needs design or review, and `mechanical` only when its pattern and gates are fixed. Tier is planner metadata, not a routing guarantee. Map it through documented host-specific model or reasoning controls only when those controls are available; otherwise do not claim a model was selected. Driver planning and dispatch, parent re-verification, branch integration, and the final claim audit remain judgment duties outside the leaf tiers. Read the local `references/token-economy.md` for the detailed rules.
 
 Do not create gates for a trivial edit or factual reply. Use this discipline when the cost of quiet incompleteness justifies the ledger.
+
+When adapting this workflow for Claude Fable 5.2, read [references/fable-5-2.md](references/fable-5-2.md). It covers effort calibration, bounded delegation, and resuming long tasks without treating model settings or a handoff as completion evidence.
