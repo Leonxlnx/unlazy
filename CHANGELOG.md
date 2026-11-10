@@ -4,6 +4,10 @@
 
 This section describes the current source tree. It does not claim that `2.1.0` has a Git tag or GitHub Release.
 
+### Model integration guidance
+
+- Add optional Fable 5.2 guidance for effort calibration, bounded delegation, task resumption, and API history integrity, with proposed behavioral evaluations. No model performance improvement has been measured by this change.
+
 ### Gate authoring
 
 - Add `scripts/gate-lint.mjs`, a non-executing advisory audit of ledger quality. Warn on whole fixed-output commands, weak success vocabulary, shared-parser path ambiguity, activity titles, unmeasured manual numbers, and mostly manual ledgers without pretending to shell-parse chains or argv. Default warnings retain a `LINT OK` marker and exit `0`; `--strict` makes them fail. Reject unknown short and long options, bound ledger reads, refuse linked or special-file inputs, escape terminal, line-separator, and bidirectional controls, and cap fields plus reported finding count so escaping cannot amplify output without bound.
