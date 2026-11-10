@@ -4,13 +4,13 @@ Read this reference when tuning unlazy for Fable 5.2. Keep the core gate and app
 
 ## Choose effort through the host
 
-Anthropic recommends `medium` for interactive work and `high` for difficult, long agentic tasks. Test `xhigh` only where it improves your outcomes. Fable 5.1 effort settings need fresh evaluation; prompting 5.2 to think less is not a reliable substitute for the effort control. See [the official prompting guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#calibrate-effort).
+Anthropic recommends starting at `high`, the Claude API default, then evaluating other levels on your tasks. Its guide describes `medium` as suitable for interactive work and `high` for difficult, long agentic tasks. Test `xhigh` only where it improves your outcomes. Fable 5.1 effort settings need fresh evaluation; prompting 5.2 to think less is not a reliable substitute for the effort control. See [the official prompting guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#calibrate-effort).
 
 Apply these settings only through a documented control exposed by the actual host. A skill cannot switch models or effort by declaring them in prose. Record the observed setting or `unavailable`; do not report an intended setting as selected. Start a fresh session for changed configuration when required by the host.
 
 ## Keep work moving within its scope
 
-Fable 5.2 can stop early on long tasks, especially at lower effort. Its delegation can also grow with the surrounding instructions. Review old blanket delegation and caution rules before adding more. See [the prompting guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#finish-the-whole-task).
+Fable 5.2 can stop early on long tasks, especially at lower effort. Its delegation can also grow with the surrounding instructions. Review old blanket delegation and caution rules before adding more. See the prompting guide on [finishing tasks](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#finish-the-whole-task), [subagent expectations](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#set-expectations-for-subagents), and [accumulated caution](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-2#keep-caution-from-piling-up).
 
 Use the ledger to choose the next unmet outcome. Diagnose an ordinary error, retry an authorized read when safe, or continue independent work while a dependency waits. A timeout after a remote mutation needs a state check before any retry. Preserve unlazy's inspected approval for runnable checks; a reviewer note cannot grant it. Keep external publication and other consequential actions within the user's actual authorization.
 
