@@ -193,7 +193,9 @@ references/orchestration.md      states, rolling dispatch, and verification hier
 references/dispatch.md           native launch waves, host adapters, and recovery
 references/parallel.md           scope and lease coordination limits
 references/token-economy.md      attention and verification cost discipline
+references/fable-5-2.md          optional Fable 5.2 workflow adaptation
 research/validation-protocol.md  historical limitations and rerun protocol
+research/fable-5-2-eval.md        proposed Fable workflow evaluation cases
 templates/                       plan, leaf, and branch ledger templates
 scripts/                         checker, linter, dispatch recorder, installer, and Stop hook
 tests/                           deterministic behavior and regression tests
